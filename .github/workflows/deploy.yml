@@ -12,7 +12,7 @@ permissions:
 
 concurrency:
   group: "pages"
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -24,13 +24,28 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: "20"
 
       - name: Install dependencies
-        run: npm install
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
 
-      - name: Build static PWA bundle
+      - name: Build production bundle
         run: npm run build
+
+      - name: Prepare GitHub Pages static files and verify dist
+        run: |
+          test -d dist || { echo "Errore: cartella dist non generata"; exit 1; }
+          test -f dist/index.html || { echo "Errore: dist/index.html mancante"; exit 1; }
+          test -f dist/manifest.webmanifest || { echo "Errore: dist/manifest.webmanifest mancante"; exit 1; }
+          test -f dist/sw.js || { echo "Errore: dist/sw.js mancante"; exit 1; }
+          touch dist/.nojekyll
+          cp dist/index.html dist/404.html
+          ls -la dist
 
       - name: Setup GitHub Pages
         uses: actions/configure-pages@v5

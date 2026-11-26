@@ -23,8 +23,11 @@ firebase.json
 *.db
 *.sqlite
 *.sqlite3
+*.idb
 backup_magiclass_*.json
+magiclass_backup*.json
 MagiClass_Backup/
+.aistudio/
 
 # Log, cache e file temporanei
 logs/

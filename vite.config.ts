@@ -47,125 +47,158 @@ const devSwCleanupPlugin = (): Plugin => ({
   }
 });
 
-// Relative base './' works identically on root domains, localhost, and GitHub Pages project subpaths (/repo-name/)
+/**
+ * Determina automaticamente il base path di Vite:
+ * - Locale (dev / preview / build locale): '/'
+ * - GitHub Actions (GitHub Pages): '/<nome-repository>/' (oppure '/' per repository <owner>.github.io)
+ * - Override manuale opzionale tramite variabile d'ambiente VITE_BASE_PATH
+ */
+const resolveBasePath = (env: Record<string, string | undefined>): string => {
+  const customBase = env.VITE_BASE_PATH?.trim();
+  if (customBase) {
+    if (customBase === '/' || customBase === './') return customBase;
+    return `/${customBase.replace(/^\/+|\/+$/g, '')}/`;
+  }
+
+  const isGitHubActions = env.GITHUB_ACTIONS === 'true';
+  const githubRepository = env.GITHUB_REPOSITORY?.trim();
+
+  if (isGitHubActions && githubRepository && githubRepository.includes('/')) {
+    const [owner, repoName] = githubRepository.split('/');
+    if (repoName && owner && repoName.toLowerCase() === `${owner.toLowerCase()}.github.io`) {
+      return '/';
+    }
+    if (repoName) {
+      return `/${repoName}/`;
+    }
+  }
+
+  return '/';
+};
+
 export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, '.', '');
-  const basePath = env.VITE_BASE_PATH || './';
+  const fileEnv = loadEnv(mode, '.', '');
+  const runtimeEnv =
+    (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
+  const mergedEnv: Record<string, string | undefined> = { ...fileEnv, ...runtimeEnv };
+  const basePath = resolveBasePath(mergedEnv);
 
   return {
     base: basePath,
-  plugins: [
-    devSwCleanupPlugin(),
-    react(),
-    VitePWA({
-      registerType: 'autoUpdate',
-      injectRegister: 'auto',
-      includeAssets: [
-        'favicon.ico',
-        'favicon.svg',
-        'icon.svg',
-        'apple-touch-icon.png',
-        'favicon-16x16.png',
-        'favicon-32x32.png',
-        'pwa-64x64.png',
-        'pwa-192x192.png',
-        'pwa-512x512.png',
-        'pwa-maskable-192x192.png',
-        'pwa-maskable-512x512.png'
-      ],
-      devOptions: {
-        enabled: false
-      },
-      workbox: {
-        globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
-        cleanupOutdatedCaches: true,
-        clientsClaim: true,
-        skipWaiting: true,
-        navigateFallbackDenylist: [/\/assets\//, /\/[^/?]+\.[^/]+$/],
-        runtimeCaching: [
-          {
-            urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
-            handler: 'StaleWhileRevalidate',
-            options: {
-              cacheName: 'magiclass-google-fonts-css',
-              expiration: { maxEntries: 10, maxAgeSeconds: 60 * 60 * 24 * 365 }
+    plugins: [
+      devSwCleanupPlugin(),
+      react(),
+      VitePWA({
+        registerType: 'autoUpdate',
+        injectRegister: 'auto',
+        includeAssets: [
+          'favicon.ico',
+          'favicon.svg',
+          'icon.svg',
+          'apple-touch-icon.png',
+          'favicon-16x16.png',
+          'favicon-32x32.png',
+          'pwa-64x64.png',
+          'pwa-192x192.png',
+          'pwa-512x512.png',
+          'pwa-maskable-192x192.png',
+          'pwa-maskable-512x512.png'
+        ],
+        devOptions: {
+          enabled: false
+        },
+        workbox: {
+          globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
+          cleanupOutdatedCaches: true,
+          clientsClaim: true,
+          skipWaiting: true,
+          navigateFallback: 'index.html',
+          navigateFallbackDenylist: [/\/assets\//, /\/[^/?]+\.[^/]+$/],
+          runtimeCaching: [
+            {
+              urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
+              handler: 'StaleWhileRevalidate',
+              options: {
+                cacheName: 'magiclass-google-fonts-css',
+                expiration: { maxEntries: 10, maxAgeSeconds: 60 * 60 * 24 * 365 }
+              }
+            },
+            {
+              urlPattern: /^https:\/\/fonts\.gstatic\.com\/.*/i,
+              handler: 'CacheFirst',
+              options: {
+                cacheName: 'magiclass-google-fonts-files',
+                expiration: { maxEntries: 20, maxAgeSeconds: 60 * 60 * 24 * 365 },
+                cacheableResponse: { statuses: [0, 200] }
+              }
             }
-          },
-          {
-            urlPattern: /^https:\/\/fonts\.gstatic\.com\/.*/i,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'magiclass-google-fonts-files',
-              expiration: { maxEntries: 20, maxAgeSeconds: 60 * 60 * 24 * 365 },
-              cacheableResponse: { statuses: [0, 200] }
+          ]
+        },
+        manifest: {
+          id: basePath,
+          name: 'MagiClass',
+          short_name: 'MagiClass',
+          description: 'Diario scolastico locale e offline per docenti.',
+          lang: 'it',
+          theme_color: '#810027',
+          background_color: '#f3ede1',
+          display: 'standalone',
+          orientation: 'any',
+          start_url: basePath,
+          scope: basePath,
+          icons: [
+            {
+              src: `${basePath}pwa-64x64.png`,
+              sizes: '64x64',
+              type: 'image/png',
+              purpose: 'any'
+            },
+            {
+              src: `${basePath}pwa-192x192.png`,
+              sizes: '192x192',
+              type: 'image/png',
+              purpose: 'any'
+            },
+            {
+              src: `${basePath}pwa-512x512.png`,
+              sizes: '512x512',
+              type: 'image/png',
+              purpose: 'any'
+            },
+            {
+              src: `${basePath}pwa-maskable-192x192.png`,
+              sizes: '192x192',
+              type: 'image/png',
+              purpose: 'maskable'
+            },
+            {
+              src: `${basePath}pwa-maskable-512x512.png`,
+              sizes: '512x512',
+              type: 'image/png',
+              purpose: 'maskable'
             }
+          ]
+        }
+      })
+    ],
+    build: {
+      outDir: 'dist',
+      emptyOutDir: true,
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            'vendor-react': ['react', 'react-dom'],
+            'vendor-icons': ['lucide-react']
           }
-        ]
-      },
-      manifest: {
-        id: './',
-        name: 'MagiClass',
-        short_name: 'MagiClass',
-        description: 'Diario scolastico locale e offline per docenti.',
-        theme_color: '#810027',
-        background_color: '#f3ede1',
-        display: 'standalone',
-        orientation: 'any',
-        start_url: './',
-        scope: './',
-        icons: [
-          {
-            src: 'pwa-64x64.png',
-            sizes: '64x64',
-            type: 'image/png',
-            purpose: 'any'
-          },
-          {
-            src: 'pwa-192x192.png',
-            sizes: '192x192',
-            type: 'image/png',
-            purpose: 'any'
-          },
-          {
-            src: 'pwa-512x512.png',
-            sizes: '512x512',
-            type: 'image/png',
-            purpose: 'any'
-          },
-          {
-            src: 'pwa-maskable-192x192.png',
-            sizes: '192x192',
-            type: 'image/png',
-            purpose: 'maskable'
-          },
-          {
-            src: 'pwa-maskable-512x512.png',
-            sizes: '512x512',
-            type: 'image/png',
-            purpose: 'maskable'
-          }
-        ]
-      }
-    })
-  ],
-  build: {
-    outDir: 'dist',
-    emptyOutDir: true,
-    rollupOptions: {
-      output: {
-        manualChunks: {
-          'vendor-react': ['react', 'react-dom'],
-          'vendor-icons': ['lucide-react']
         }
       }
-    }
-  },
+    },
     server: {
       port: 3000,
       host: '0.0.0.0',
       strictPort: true,
       allowedHosts: true,
-      hmr: env.DISABLE_HMR !== 'true'
+      hmr: mergedEnv.DISABLE_HMR !== 'true'
     },
     preview: {
       port: 3000,
