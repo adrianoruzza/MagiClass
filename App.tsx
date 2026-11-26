@@ -45,6 +45,7 @@ import {
   getSnapshotById,
   safeSetLocalStorageItem
 } from './utils/localDatabase';
+import { saveQuickBackupToLocalFolder } from './utils/deviceBackup';
 
 // --- HELPER FUNCTIONS ---
 
@@ -267,18 +268,33 @@ const App: React.FC = () => {
     id: string;
     message: string;
     type: 'info' | 'success' | 'warning' | 'error';
+    actionLabel?: string;
+    onAction?: () => void;
+    durationMs?: number;
   }
   const [toast, setToast] = useState<ToastNotification | null>(null);
+  const [isQuickBackupSaving, setIsQuickBackupSaving] = useState(false);
 
-  const showToast = useCallback((message: string, type: 'info' | 'success' | 'warning' | 'error' = 'info') => {
-    setToast({ id: crypto.randomUUID(), message, type });
+  const showToast = useCallback((
+    message: string,
+    type: 'info' | 'success' | 'warning' | 'error' = 'info',
+    options?: { actionLabel?: string; onAction?: () => void; durationMs?: number }
+  ) => {
+    setToast({
+      id: crypto.randomUUID(),
+      message,
+      type,
+      actionLabel: options?.actionLabel,
+      onAction: options?.onAction,
+      durationMs: options?.durationMs
+    });
   }, []);
 
   useEffect(() => {
     if (!toast) return;
     const t = setTimeout(() => {
       setToast(null);
-    }, 4000);
+    }, toast.durationMs ?? (toast.actionLabel ? 9000 : 4500));
     return () => clearTimeout(t);
   }, [toast]);
 
@@ -2222,6 +2238,113 @@ const App: React.FC = () => {
     };
   }, [schoolYears, schoolStartDate, schoolEndDate, semesterSplitDate, isSixDayWeek, schoolClosures, activeSchoolYear, schedule, lessonNotes, specialDays, provisionalPeriods, timeSlots, recesses, activeSubjects, activeClasses, durations, maxHours, taskTemplates, linkedSubjectGroups, currentDate]);
 
+  // Payload completo di TUTTI i dati, anni scolastici, impostazioni e stato attuale (per il tasto Floppy)
+  const getCompleteAppBackupPayload = useCallback(() => {
+    const effectiveYears: SchoolYear[] = schoolYears.length > 0 ? schoolYears : [{
+      id: crypto.randomUUID(),
+      label: `${schoolStartDate.getFullYear()}/${schoolStartDate.getFullYear() + 1}`,
+      startDate: getLocalDateStr(schoolStartDate),
+      endDate: getLocalDateStr(schoolEndDate),
+      splitDate: getLocalDateStr(semesterSplitDate),
+      isSixDayWeek,
+      closures: schoolClosures
+    }];
+
+    const currentDateStr = getLocalDateStr(currentDate);
+    const activeYear = effectiveYears.find(y => currentDateStr >= y.startDate && currentDateStr <= y.endDate)
+      || activeSchoolYear
+      || effectiveYears[0];
+
+    const exportedTimeSlots: Record<number, string> = JSON.parse(JSON.stringify(timeSlots || {}));
+    const exportedDurations: Record<number, number> = JSON.parse(JSON.stringify(durations || {}));
+    const exportedRecesses: Recess[] = JSON.parse(JSON.stringify(recesses || []));
+
+    const normalizedYears: SchoolYear[] = effectiveYears.map(y =>
+      y.id === activeYear.id
+        ? {
+            ...y,
+            timeSlots: exportedTimeSlots,
+            durations: exportedDurations,
+            recesses: exportedRecesses,
+            maxHours
+          }
+        : y
+    );
+
+    let allTaskTemplates = taskTemplates;
+    if (!allTaskTemplates || allTaskTemplates.length === 0) {
+      try {
+        const rawSaved = localStorage.getItem('techdraw_task_templates');
+        if (rawSaved) allTaskTemplates = JSON.parse(rawSaved);
+      } catch (e) {
+        console.warn('Errore lettura techdraw_task_templates:', e);
+      }
+    }
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const localIso = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+    return {
+      exportedAt: localIso,
+      createdAt: localIso,
+      appVersion: APP_VERSION,
+      schedule: JSON.parse(JSON.stringify(schedule || [])),
+      lessonNotes: JSON.parse(JSON.stringify(lessonNotes || [])),
+      specialDays: JSON.parse(JSON.stringify(specialDays || [])),
+      schoolClosures: JSON.parse(JSON.stringify(schoolClosures || [])),
+      timeSlots: exportedTimeSlots,
+      recesses: exportedRecesses,
+      subjects: JSON.parse(JSON.stringify(subjects || [])),
+      classes: JSON.parse(JSON.stringify(classes || [])),
+      schoolStartDate: schoolStartDate.toISOString(),
+      schoolEndDate: schoolEndDate.toISOString(),
+      semesterSplitDate: semesterSplitDate.toISOString(),
+      isSixDayWeek,
+      durations: exportedDurations,
+      maxHours,
+      timeSettingsUpdatedAt: localStorage.getItem('magiclass_time_settings_updated_at') || undefined,
+      taskTemplates: JSON.parse(JSON.stringify(allTaskTemplates || [])),
+      schoolYears: JSON.parse(JSON.stringify(normalizedYears)),
+      provisionalPeriods: JSON.parse(JSON.stringify(provisionalPeriods || [])),
+      linkedSubjectGroups: JSON.parse(JSON.stringify(linkedSubjectGroups || []))
+    };
+  }, [schoolYears, schoolStartDate, schoolEndDate, semesterSplitDate, isSixDayWeek, schoolClosures, activeSchoolYear, currentDate, timeSlots, durations, recesses, maxHours, taskTemplates, schedule, lessonNotes, specialDays, subjects, classes, provisionalPeriods, linkedSubjectGroups]);
+
+  const handleQuickBackup = useCallback(async (forcePickFolder: boolean = false) => {
+    if (isQuickBackupSaving) return;
+    setIsQuickBackupSaving(true);
+    try {
+      const payload = getCompleteAppBackupPayload();
+      const result = await saveQuickBackupToLocalFolder(payload, { forcePickFolder });
+
+      if (result.status === 'saved') {
+        if (result.savedAtIso) setLastBackupTime(result.savedAtIso);
+        showToast(result.message, 'success', { durationMs: 5000 });
+      } else if (result.status === 'fallback_download') {
+        if (result.savedAtIso) setLastBackupTime(result.savedAtIso);
+        showToast(result.message, 'warning', { durationMs: 7500 });
+      } else if (result.status === 'permission_revoked' || result.status === 'folder_unavailable') {
+        showToast(result.message, 'error', {
+          actionLabel: 'Scegli cartella',
+          onAction: () => {
+            setToast(null);
+            void handleQuickBackup(true);
+          },
+          durationMs: 10000
+        });
+      } else if (result.status === 'cancelled') {
+        showToast(result.message, 'info', { durationMs: 3000 });
+      } else {
+        showToast(result.message, 'error', { durationMs: 7000 });
+      }
+    } catch (err: any) {
+      showToast(`Errore imprevisto durante il backup: ${err?.message || String(err)}`, 'error', { durationMs: 7000 });
+    } finally {
+      setIsQuickBackupSaving(false);
+    }
+  }, [isQuickBackupSaving, getCompleteAppBackupPayload, showToast]);
+
   const handleSelectiveRestore = async (
     backupJson: any, 
     targetYearSummary: DetectedYearSummary, 
@@ -2511,6 +2634,8 @@ const App: React.FC = () => {
         onSwapLessons={handleSwapLessons} onUpdateNoteStatus={handleUpdateNoteStatus} onMoveNoteItem={handleMoveNoteItem}
         onToggleREStatus={handleToggleREStatus}
         onToggleVotoStatus={handleToggleVotoStatus}
+        onQuickBackup={() => { void handleQuickBackup(false); }}
+        isQuickBackupSaving={isQuickBackupSaving}
       />
       {isAssignmentModalOpen && selectedLesson && (
         <AssignmentModal
@@ -2711,7 +2836,7 @@ const App: React.FC = () => {
       />
       {toast && (
         <div 
-          className={`fixed top-4 left-1/2 -translate-x-1/2 z-[999] px-4 py-2.5 rounded-2xl shadow-xl flex items-center gap-3 font-semibold text-sm backdrop-blur-md animate-magi-slide-down transition-all max-w-[90vw] ${
+          className={`fixed top-4 left-1/2 -translate-x-1/2 z-[999] px-4 py-2.5 rounded-2xl shadow-xl flex items-center gap-3 font-semibold text-sm backdrop-blur-md animate-magi-slide-down transition-all max-w-[92vw] ${
             toast.type === 'success' ? 'bg-emerald-800 text-white border border-emerald-700' :
             toast.type === 'warning' ? 'bg-amber-800 text-white border border-amber-700' :
             toast.type === 'error' ? 'bg-rose-800 text-white border border-rose-700' :
@@ -2721,9 +2846,20 @@ const App: React.FC = () => {
           role="alert"
         >
           <span>{toast.message}</span>
+          {toast.actionLabel && toast.onAction && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                toast.onAction?.();
+              }}
+              className="px-3 py-1 bg-white text-slate-900 hover:bg-slate-100 rounded-xl text-xs font-black shrink-0 shadow-sm transition-colors"
+            >
+              {toast.actionLabel}
+            </button>
+          )}
           <button 
             onClick={(e) => { e.stopPropagation(); setToast(null); }}
-            className="p-1 hover:bg-white/20 rounded-full transition-colors ml-1 text-white/80 hover:text-white"
+            className="p-1 hover:bg-white/20 rounded-full transition-colors ml-1 text-white/80 hover:text-white shrink-0"
             aria-label="Chiudi notifica"
           >
             ✕

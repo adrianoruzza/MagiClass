@@ -28,6 +28,16 @@ export interface DeviceBackupResult {
   schemaVersion: string;
 }
 
+export interface QuickBackupResult {
+  status: 'saved' | 'fallback_download' | 'permission_revoked' | 'folder_unavailable' | 'cancelled' | 'error';
+  fileName: string;
+  folderName?: string;
+  size?: number;
+  savedAtIso?: string;
+  savedAtFormatted?: string;
+  message: string;
+}
+
 export const formatLastBackupTimestamp = (isoStringOrDate?: string | Date | null): string => {
   if (!isoStringOrDate) {
     return '';
@@ -303,12 +313,12 @@ export const clearSavedDirectoryHandle = async (): Promise<void> => {
 };
 
 export const isFileSystemAccessSupported = (): boolean => {
-  return typeof window !== 'undefined' && 'showDirectoryPicker' in window;
+  return typeof window !== 'undefined' && typeof (window as any).showDirectoryPicker === 'function';
 };
 
 /**
  * Genera il nome univoco del file nel formato:
- * backup_magiclass_AAAA-MM-GG_hhmmss.json
+ * MagiClass_Backup_AAAA-MM-GG_HHMMSS.json
  */
 export const generateUniqueBackupFileName = (date: Date = new Date()): string => {
   const pad = (n: number) => String(n).padStart(2, '0');
@@ -318,19 +328,28 @@ export const generateUniqueBackupFileName = (date: Date = new Date()): string =>
   const hh = pad(date.getHours());
   const min = pad(date.getMinutes());
   const ss = pad(date.getSeconds());
-  return `backup_magiclass_${yyyy}-${mm}-${dd}_${hh}${min}${ss}.json`;
+  return `MagiClass_Backup_${yyyy}-${mm}-${dd}_${hh}${min}${ss}.json`;
+};
+
+const formatDateTimeItalian = (date: Date): string => {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 };
 
 const ensureDirectoryPermission = async (
   dirHandle: FileSystemDirectoryHandle,
   mode: 'read' | 'readwrite'
 ): Promise<boolean> => {
-  // @ts-ignore
-  const perm = await dirHandle.queryPermission({ mode });
-  if (perm === 'granted') return true;
-  // @ts-ignore
-  const reqPerm = await dirHandle.requestPermission({ mode });
-  return reqPerm === 'granted';
+  try {
+    // @ts-ignore
+    const perm = await dirHandle.queryPermission({ mode });
+    if (perm === 'granted') return true;
+    // @ts-ignore
+    const reqPerm = await dirHandle.requestPermission({ mode });
+    return reqPerm === 'granted';
+  } catch {
+    return false;
+  }
 };
 
 /**
@@ -345,21 +364,11 @@ export const configureBackupDirectory = async (): Promise<string | null> => {
     // @ts-ignore
     const dirHandle: FileSystemDirectoryHandle = await window.showDirectoryPicker({
       id: 'magiclass_backup_folder',
-      mode: 'readwrite',
-      startIn: 'desktop'
+      mode: 'readwrite'
     });
 
-    let targetDir = dirHandle;
-    if (dirHandle.name !== 'MagiClass_Backup') {
-      try {
-        targetDir = await dirHandle.getDirectoryHandle('MagiClass_Backup', { create: true });
-      } catch {
-        targetDir = dirHandle;
-      }
-    }
-
-    await saveDirectoryHandle(targetDir);
-    return targetDir.name;
+    await saveDirectoryHandle(dirHandle);
+    return dirHandle.name;
   } catch (err: any) {
     if (err.name === 'AbortError') {
       return null;
@@ -606,4 +615,171 @@ export const exportBackupToDevice = async (
 
   // Metodo 2 e 3: Salvataggio con SaveFilePicker o Download standard
   return exportTransferableBackupFile(rawBackupData);
+};
+
+const triggerClassicDownload = (blob: Blob, fileName: string): void => {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+};
+
+/**
+ * Salvataggio rapido con tasto Floppy:
+ * - Prima volta: apre showDirectoryPicker() e salva il FileSystemDirectoryHandle in IndexedDB.
+ * - Volte successive: salva automaticamente nella stessa cartella senza aprire il selettore.
+ * - Permesso revocato / cartella non disponibile: segnala chiaramente l'errore e consente di riscegliere la cartella.
+ * - Browser senza showDirectoryPicker (es. Firefox/Safari): fallback download classico con avviso esplicito.
+ */
+export const saveQuickBackupToLocalFolder = async (
+  rawBackupData: any,
+  options?: { forcePickFolder?: boolean }
+): Promise<QuickBackupResult> => {
+  const now = new Date();
+  const fileName = generateUniqueBackupFileName(now);
+  const savedAtFormatted = formatDateTimeItalian(now);
+  const savedAtIso = now.toISOString();
+
+  let jsonString: string;
+  let blob: Blob;
+  try {
+    const versioned = await prepareVersionedBackupPayload(rawBackupData);
+    jsonString = JSON.stringify(versioned, null, 2);
+    validateSerializedBackup(jsonString);
+    blob = new Blob([jsonString], { type: 'application/json' });
+  } catch (err: any) {
+    return {
+      status: 'error',
+      fileName,
+      message: `Impossibile preparare il backup: ${err?.message || String(err)}`
+    };
+  }
+
+  // Fallback per browser che non supportano File System Access API (es. Firefox / Safari)
+  if (!isFileSystemAccessSupported()) {
+    try {
+      triggerClassicDownload(blob, fileName);
+      recordLastBackupSuccess(savedAtIso);
+      return {
+        status: 'fallback_download',
+        fileName,
+        size: blob.size,
+        savedAtIso,
+        savedAtFormatted,
+        message: `Backup scaricato (${fileName}) — ${savedAtFormatted}. In questo browser dovrai scegliere la cartella manualmente ogni volta.`
+      };
+    } catch (err: any) {
+      return {
+        status: 'error',
+        fileName,
+        message: `Errore durante il download del backup: ${err?.message || String(err)}`
+      };
+    }
+  }
+
+  let dirHandle: FileSystemDirectoryHandle | null = options?.forcePickFolder
+    ? null
+    : await getSavedDirectoryHandle();
+
+  // Prima volta (o nuova selezione richiesta): apre il selettore di cartella del sistema
+  if (!dirHandle) {
+    try {
+      // @ts-ignore
+      dirHandle = await window.showDirectoryPicker({
+        id: 'magiclass_backup_folder',
+        mode: 'readwrite'
+      });
+      if (dirHandle) {
+        await saveDirectoryHandle(dirHandle);
+      }
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        return {
+          status: 'cancelled',
+          fileName,
+          message: 'Salvataggio backup annullato: nessuna cartella selezionata.'
+        };
+      }
+      return {
+        status: 'error',
+        fileName,
+        message: `Impossibile aprire il selettore cartella: ${err?.message || String(err)}`
+      };
+    }
+  }
+
+  if (!dirHandle) {
+    return {
+      status: 'cancelled',
+      fileName,
+      message: 'Nessuna cartella selezionata per il salvataggio.'
+    };
+  }
+
+  const folderName = dirHandle.name;
+
+  // Verifica / rinnovo permesso di scrittura sulla cartella memorizzata
+  const hasPermission = await ensureDirectoryPermission(dirHandle, 'readwrite');
+  if (!hasPermission) {
+    await clearSavedDirectoryHandle();
+    return {
+      status: 'permission_revoked',
+      fileName,
+      folderName,
+      message: `Permesso revocato o negato per la cartella "${folderName}". Scegli di nuovo la cartella di backup.`
+    };
+  }
+
+  // Scrittura reale su disco locale
+  try {
+    const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
+    // @ts-ignore
+    const writable = await fileHandle.createWritable();
+    await writable.write(blob);
+    await writable.close();
+
+    // Verifica attiva che il file scritto esista e non sia vuoto
+    const writtenFile = await fileHandle.getFile();
+    if (!writtenFile || writtenFile.size === 0) {
+      throw new Error('Verifica post-scrittura fallita: il file salvato su disco risulta vuoto.');
+    }
+
+    recordLastBackupSuccess(savedAtIso);
+    return {
+      status: 'saved',
+      fileName,
+      folderName,
+      size: writtenFile.size,
+      savedAtIso,
+      savedAtFormatted,
+      message: `Backup salvato in ${folderName} — ${savedAtFormatted}`
+    };
+  } catch (err: any) {
+    const errName = err?.name || '';
+    if (
+      errName === 'NotFoundError' ||
+      errName === 'NotAllowedError' ||
+      errName === 'InvalidStateError' ||
+      errName === 'SecurityError'
+    ) {
+      await clearSavedDirectoryHandle();
+      return {
+        status: 'folder_unavailable',
+        fileName,
+        folderName,
+        message: `La cartella "${folderName}" non è più disponibile o il permesso è stato revocato (${err?.message || errName}). Scegli di nuovo la cartella di backup.`
+      };
+    }
+    return {
+      status: 'error',
+      fileName,
+      folderName,
+      message: `Errore durante il salvataggio del backup: ${err?.message || String(err)}`
+    };
+  }
 };

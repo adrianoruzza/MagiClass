@@ -93,8 +93,7 @@ export default defineConfig(({ mode }) => {
         injectRegister: 'auto',
         includeAssets: [
           'favicon.ico',
-          'favicon.svg',
-          'icon.svg',
+          'app-icon.png',
           'apple-touch-icon.png',
           'favicon-16x16.png',
           'favicon-32x32.png',
@@ -141,7 +140,7 @@ export default defineConfig(({ mode }) => {
           description: 'Diario scolastico locale e offline per docenti.',
           lang: 'it',
           theme_color: '#810027',
-          background_color: '#f3ede1',
+          background_color: '#810027',
           display: 'standalone',
           orientation: 'any',
           start_url: basePath,

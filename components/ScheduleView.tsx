@@ -6,7 +6,8 @@ import { isDateInProvisionalPeriod, getEffectiveTimeSlotsForDate, getEffectiveTi
 import { isDisposizioneLesson } from '../utils/repetitionUtils';
 import { formatLastBackupTimestamp } from '../utils/deviceBackup';
 import { findNoteForLessonUnified } from '../utils/noteLookup';
-import { Plus, Check, ChevronLeft, ChevronRight, Calendar, Copy, Circle, X, Undo2, Redo2, Coffee, LayoutGrid, RectangleHorizontal, UserMinus, Users, Stethoscope, School, ChevronDown, Ban, GripHorizontal, ArrowRight, Clock, Settings, Search, MapPin, Filter, Repeat } from 'lucide-react';
+import { Plus, Check, ChevronLeft, ChevronRight, Calendar, Copy, Circle, X, Undo2, Redo2, Coffee, LayoutGrid, RectangleHorizontal, UserMinus, Users, Stethoscope, School, ChevronDown, Ban, GripHorizontal, ArrowRight, Clock, Settings, Search, MapPin, Filter, Repeat, Save } from 'lucide-react';
+import AppIcon from './AppIcon';
 
 interface ScheduleViewProps {
   schedule: Lesson[];
@@ -52,6 +53,8 @@ interface ScheduleViewProps {
   onMoveNoteItem: (lessonId: string, dateStr: string, field: 'toCheck' | 'toDo' | 'misc', text: string) => void;
   onToggleREStatus: (lessonId: string, dateStr: string) => void;
   onToggleVotoStatus: (lessonId: string, dateStr: string) => void;
+  onQuickBackup?: () => void;
+  isQuickBackupSaving?: boolean;
 }
 
 const getLocalDateKey = (d: Date) => {
@@ -269,7 +272,9 @@ const ScheduleView: React.FC<ScheduleViewProps> = ({
   onUpdateNoteStatus,
   onMoveNoteItem,
   onToggleREStatus,
-  onToggleVotoStatus
+  onToggleVotoStatus,
+  onQuickBackup,
+  isQuickBackupSaving = false
 }) => {
   const hoursArray = useMemo(() => Array.from({ length: maxHours }, (_, i) => i + 1), [maxHours]);
 
@@ -1462,8 +1467,17 @@ const ScheduleView: React.FC<ScheduleViewProps> = ({
         <div className="flex md:hidden flex-col w-full gap-0.5">
           {/* Riga Superiore: Pulsanti di Azione */}
           <div className="flex items-center justify-between w-full">
-            {/* Gruppo Sinistra: Navigazione, Ore Residue, Filtro Classi, Switcher Vista */}
+            {/* Gruppo Sinistra: Icona App, Navigazione, Ore Residue, Filtro Classi, Switcher Vista */}
             <div className="flex items-center gap-1 min-[360px]:gap-1.5 min-[390px]:gap-2 sm:gap-2.5 shrink-0">
+              <button
+                onClick={() => onNavigate('today')}
+                className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg overflow-hidden shrink-0 shadow-xs ring-1 ring-white/25 transition-transform active:scale-95"
+                title="MagiClass - Torna a oggi"
+                aria-label="MagiClass"
+              >
+                <AppIcon className="w-full h-full" />
+              </button>
+
               <button 
                 onClick={() => onNavigate('prev')} 
                 className="w-7 h-7 sm:w-8 sm:h-8 flex items-center justify-center bg-white/10 hover:bg-white/20 active:bg-white/30 text-white rounded-full transition-all magi-press shadow-xs shrink-0"
@@ -1521,7 +1535,7 @@ const ScheduleView: React.FC<ScheduleViewProps> = ({
               </button>
             </div>
 
-            {/* Gruppo Destra: Ricerca, Impostazioni */}
+            {/* Gruppo Destra: Ricerca, Impostazioni, Salva Backup (Floppy) */}
             <div className="flex items-center gap-1 min-[360px]:gap-1.5 min-[390px]:gap-2 sm:gap-2.5 shrink-0">
 
               <button 
@@ -1539,6 +1553,20 @@ const ScheduleView: React.FC<ScheduleViewProps> = ({
               >
                 <Settings className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
               </button>
+
+              {onQuickBackup && (
+                <button
+                  onClick={onQuickBackup}
+                  disabled={isQuickBackupSaving}
+                  className={`w-7 h-7 sm:w-8 sm:h-8 flex items-center justify-center bg-white/10 hover:bg-white/20 active:bg-white/30 text-white rounded-full transition-all magi-press shadow-xs shrink-0 ${
+                    isQuickBackupSaving ? 'opacity-60 animate-pulse cursor-wait' : ''
+                  }`}
+                  title="Salva backup"
+                  aria-label="Salva backup"
+                >
+                  <Save className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                </button>
+              )}
             </div>
           </div>
 
@@ -1605,8 +1633,17 @@ const ScheduleView: React.FC<ScheduleViewProps> = ({
         {/* VERSIONE TABLET (md <= screen < lg): RIGA SINGOLA COMPATTA */}
         {/* ========================================================= */}
         <div className="hidden md:flex lg:hidden items-center justify-between w-full gap-2">
-          {/* Gruppo Sinistra: Navigazione, Ore Residue, Filtro Classi */}
+          {/* Gruppo Sinistra: Icona App, Navigazione, Ore Residue, Filtro Classi */}
           <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              onClick={() => onNavigate('today')}
+              className="w-8 h-8 rounded-lg overflow-hidden shrink-0 shadow-xs ring-1 ring-white/25 transition-transform active:scale-95"
+              title="MagiClass - Torna a oggi"
+              aria-label="MagiClass"
+            >
+              <AppIcon className="w-full h-full" />
+            </button>
+
             <button 
               onClick={() => onNavigate('prev')} 
               className="w-8 h-8 flex items-center justify-center bg-white/10 hover:bg-white/20 active:bg-white/30 text-white rounded-full transition-all magi-press shadow-xs shrink-0"
@@ -1728,6 +1765,20 @@ const ScheduleView: React.FC<ScheduleViewProps> = ({
             >
               <Redo2 className="w-4 h-4" />
             </button>
+
+            {onQuickBackup && (
+              <button
+                onClick={onQuickBackup}
+                disabled={isQuickBackupSaving}
+                className={`w-8 h-8 flex items-center justify-center bg-white/10 hover:bg-white/20 active:bg-white/30 text-white rounded-full transition-all magi-press shadow-xs shrink-0 ${
+                  isQuickBackupSaving ? 'opacity-60 animate-pulse cursor-wait' : ''
+                }`}
+                title="Salva backup"
+                aria-label="Salva backup"
+              >
+                <Save className="w-4 h-4" />
+              </button>
+            )}
           </div>
         </div>
 
@@ -1736,6 +1787,14 @@ const ScheduleView: React.FC<ScheduleViewProps> = ({
         {/* ========================================================= */}
         <div className="hidden lg:flex items-center justify-between w-full">
           <div className="flex items-center gap-2 z-10 flex-none shrink-0">
+            <button
+              onClick={() => onNavigate('today')}
+              className="w-10 h-10 rounded-xl overflow-hidden shrink-0 shadow-sm ring-1 ring-white/25 transition-transform hover:scale-105 active:scale-95"
+              title="MagiClass - Torna a oggi"
+              aria-label="MagiClass"
+            >
+              <AppIcon className="w-full h-full" />
+            </button>
             <button onClick={() => onNavigate('prev')} className="p-2 bg-white/10 hover:bg-white/20 text-white rounded-full transition-colors magi-press shadow-sm" title="Settimana precedente">
               <ChevronLeft className="w-6 h-6" />
             </button>
@@ -1829,6 +1888,19 @@ const ScheduleView: React.FC<ScheduleViewProps> = ({
             >
               <Redo2 className="w-6 h-6" />
             </button>
+            {onQuickBackup && (
+              <button
+                onClick={onQuickBackup}
+                disabled={isQuickBackupSaving}
+                className={`p-2 bg-white/10 hover:bg-white/20 text-white rounded-full transition-all magi-press shadow-sm ${
+                  isQuickBackupSaving ? 'opacity-60 animate-pulse cursor-wait' : ''
+                }`}
+                title="Salva backup"
+                aria-label="Salva backup"
+              >
+                <Save className="w-6 h-6" />
+              </button>
+            )}
           </div>
         </div>
       </div>

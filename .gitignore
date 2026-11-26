@@ -26,6 +26,7 @@ firebase.json
 *.idb
 backup_magiclass_*.json
 magiclass_backup*.json
+MagiClass_Backup_*.json
 MagiClass_Backup/
 .aistudio/
 
