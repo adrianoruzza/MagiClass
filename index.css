@@ -1,0 +1,254 @@
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom scrollbar styles */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #f1f5f9; 
+}
+::-webkit-scrollbar-thumb {
+  background: #a33352; /* Primary Light */
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #810027; /* Primary */
+}
+
+body {
+  overscroll-behavior-y: none;
+}
+
+/* --- MAGI-ANIMATIONS --- */
+
+@keyframes magi-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes magi-backdrop-in {
+  from { opacity: 0; backdrop-filter: blur(0px); }
+  to { opacity: 1; backdrop-filter: blur(8px); }
+}
+
+@keyframes magi-modal-pop {
+  from { opacity: 0; transform: scale(0.96) translateY(20px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+@keyframes magi-slide-up {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+@keyframes magi-slide-down {
+  from { transform: translateY(-20px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+@keyframes magi-scale-in {
+  from { transform: scale(0.9); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+/* Utility Classes for Higher Quality Transitions */
+.animate-magi-backdrop {
+  animation: magi-backdrop-in 0.4s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+}
+
+.animate-magi-modal {
+  animation: magi-modal-pop 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-magi-slide-up {
+  animation: magi-slide-up 0.4s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+}
+
+.animate-magi-fade {
+  animation: magi-fade-in 0.3s ease-out forwards;
+}
+
+.animate-magi-scale {
+  animation: magi-scale-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+/* Hover & Active Effects */
+.magi-press {
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.magi-press:active {
+  transform: scale(0.97);
+}
+
+.magi-hover-lift {
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.2s ease;
+}
+.magi-hover-lift:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+}
+
+/* Special Lesson Event Diagonal Hatching (45deg) */
+.special-event-hatch {
+  background-color: var(--hatch-bg, #f8fafc);
+  background-image: repeating-linear-gradient(
+    45deg,
+    transparent 0px,
+    transparent 7px,
+    var(--hatch-stripe, rgba(203, 213, 225, 0.62)) 7px,
+    var(--hatch-stripe, rgba(203, 213, 225, 0.62)) 9.5px
+  );
+}
+
+.group:hover .special-event-hatch {
+  background-color: var(--hatch-bg-hover, #f1f5f9);
+  background-image: repeating-linear-gradient(
+    45deg,
+    transparent 0px,
+    transparent 7px,
+    var(--hatch-stripe-hover, rgba(203, 213, 225, 0.8)) 7px,
+    var(--hatch-stripe-hover, rgba(203, 213, 225, 0.8)) 9.5px
+  );
+}
+
+.special-event-label {
+  text-shadow: 0 1px 2px rgba(255, 255, 255, 0.88), 0 0 6px rgba(255, 255, 255, 0.55);
+}
+
+.hatch-red {
+  --hatch-bg: #fef2f2;
+  --hatch-bg-hover: #fee2e2;
+  --hatch-stripe: rgba(252, 165, 165, 0.52);
+  --hatch-stripe-hover: rgba(252, 165, 165, 0.68);
+}
+.hatch-rose {
+  --hatch-bg: #fff1f2;
+  --hatch-bg-hover: #ffe4e6;
+  --hatch-stripe: rgba(253, 164, 175, 0.52);
+  --hatch-stripe-hover: rgba(253, 164, 175, 0.68);
+}
+.hatch-pink {
+  --hatch-bg: #fdf2f8;
+  --hatch-bg-hover: #fce7f3;
+  --hatch-stripe: rgba(249, 168, 212, 0.52);
+  --hatch-stripe-hover: rgba(249, 168, 212, 0.68);
+}
+.hatch-orange {
+  --hatch-bg: #fff7ed;
+  --hatch-bg-hover: #ffedd5;
+  --hatch-stripe: rgba(253, 186, 116, 0.55);
+  --hatch-stripe-hover: rgba(253, 186, 116, 0.72);
+}
+.hatch-amber {
+  --hatch-bg: #fffbeb;
+  --hatch-bg-hover: #fef3c7;
+  --hatch-stripe: rgba(252, 211, 77, 0.5);
+  --hatch-stripe-hover: rgba(252, 211, 77, 0.68);
+}
+.hatch-yellow {
+  --hatch-bg: #fefce8;
+  --hatch-bg-hover: #fef9c3;
+  --hatch-stripe: rgba(253, 224, 71, 0.5);
+  --hatch-stripe-hover: rgba(253, 224, 71, 0.68);
+}
+.hatch-lime {
+  --hatch-bg: #f7fee7;
+  --hatch-bg-hover: #ecfccb;
+  --hatch-stripe: rgba(190, 242, 100, 0.48);
+  --hatch-stripe-hover: rgba(190, 242, 100, 0.65);
+}
+.hatch-green {
+  --hatch-bg: #f0fdf4;
+  --hatch-bg-hover: #dcfce7;
+  --hatch-stripe: rgba(134, 239, 172, 0.52);
+  --hatch-stripe-hover: rgba(134, 239, 172, 0.68);
+}
+.hatch-emerald {
+  --hatch-bg: #ecfdf5;
+  --hatch-bg-hover: #d1fae5;
+  --hatch-stripe: rgba(110, 231, 183, 0.52);
+  --hatch-stripe-hover: rgba(110, 231, 183, 0.68);
+}
+.hatch-teal {
+  --hatch-bg: #f0fdfa;
+  --hatch-bg-hover: #ccfbf1;
+  --hatch-stripe: rgba(94, 234, 212, 0.5);
+  --hatch-stripe-hover: rgba(94, 234, 212, 0.68);
+}
+.hatch-cyan {
+  --hatch-bg: #ecfeff;
+  --hatch-bg-hover: #cffafe;
+  --hatch-stripe: rgba(103, 232, 249, 0.52);
+  --hatch-stripe-hover: rgba(103, 232, 249, 0.68);
+}
+.hatch-sky {
+  --hatch-bg: #f0f9ff;
+  --hatch-bg-hover: #e0f2fe;
+  --hatch-stripe: rgba(125, 211, 252, 0.52);
+  --hatch-stripe-hover: rgba(125, 211, 252, 0.68);
+}
+.hatch-blue {
+  --hatch-bg: #eff6ff;
+  --hatch-bg-hover: #dbeafe;
+  --hatch-stripe: rgba(147, 197, 253, 0.54);
+  --hatch-stripe-hover: rgba(147, 197, 253, 0.72);
+}
+.hatch-indigo {
+  --hatch-bg: #eef2ff;
+  --hatch-bg-hover: #e0e7ff;
+  --hatch-stripe: rgba(165, 180, 252, 0.54);
+  --hatch-stripe-hover: rgba(165, 180, 252, 0.72);
+}
+.hatch-violet {
+  --hatch-bg: #f5f3ff;
+  --hatch-bg-hover: #ede9fe;
+  --hatch-stripe: rgba(196, 181, 253, 0.54);
+  --hatch-stripe-hover: rgba(196, 181, 253, 0.72);
+}
+.hatch-purple {
+  --hatch-bg: #faf5ff;
+  --hatch-bg-hover: #f3e8ff;
+  --hatch-stripe: rgba(216, 180, 254, 0.54);
+  --hatch-stripe-hover: rgba(216, 180, 254, 0.72);
+}
+.hatch-fuchsia {
+  --hatch-bg: #fdf4ff;
+  --hatch-bg-hover: #fae8ff;
+  --hatch-stripe: rgba(240, 171, 252, 0.52);
+  --hatch-stripe-hover: rgba(240, 171, 252, 0.68);
+}
+.hatch-stone {
+  --hatch-bg: #fafaf9;
+  --hatch-bg-hover: #f5f5f4;
+  --hatch-stripe: rgba(214, 211, 209, 0.65);
+  --hatch-stripe-hover: rgba(214, 211, 209, 0.85);
+}
+.hatch-slate {
+  --hatch-bg: #f8fafc;
+  --hatch-bg-hover: #f1f5f9;
+  --hatch-stripe: rgba(203, 213, 225, 0.62);
+  --hatch-stripe-hover: rgba(203, 213, 225, 0.82);
+}
+.hatch-zinc {
+  --hatch-bg: #fafafa;
+  --hatch-bg-hover: #f4f4f5;
+  --hatch-stripe: rgba(212, 212, 216, 0.62);
+  --hatch-stripe-hover: rgba(212, 212, 216, 0.82);
+}
+.hatch-neutral {
+  --hatch-bg: #fafafa;
+  --hatch-bg-hover: #f5f5f5;
+  --hatch-stripe: rgba(212, 212, 212, 0.62);
+  --hatch-stripe-hover: rgba(212, 212, 212, 0.82);
+}
+.hatch-gray {
+  --hatch-bg: #f9fafb;
+  --hatch-bg-hover: #f3f4f6;
+  --hatch-stripe: rgba(209, 213, 219, 0.62);
+  --hatch-stripe-hover: rgba(209, 213, 219, 0.82);
+}
+
