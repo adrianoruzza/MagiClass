@@ -46,6 +46,17 @@ import {
   safeSetLocalStorageItem
 } from './utils/localDatabase';
 import { saveQuickBackupToLocalFolder } from './utils/deviceBackup';
+import {
+  ActiveModalScreen,
+  ScrollContainerKey,
+  ScrollPositionsMap,
+  UI_SESSION_SCHEMA_VERSION,
+  UiSessionState,
+  createUiSessionPersister,
+  formatLocalDateString,
+  loadLastUiSession,
+  reconcileSessionWithAppData
+} from './utils/sessionState';
 
 // --- HELPER FUNCTIONS ---
 
@@ -641,26 +652,58 @@ const App: React.FC = () => {
     );
   }, []);
 
+  const applyRestoredUiSessionRef = useRef<(rawSession: UiSessionState, loadedData: LocalAppState) => void>(() => {});
+  const isSessionRestoredRef = useRef(false);
+
   // Inizializzazione database locale IndexedDB + migrazione verificata automatica da localStorage
   useEffect(() => {
     let cancelled = false;
     const initialSnapshotState = buildCurrentLocalAppStateRef.current();
 
     initAndLoadLocalDatabase(initialSnapshotState)
-      .then((result) => {
+      .then(async (result) => {
         if (cancelled) return;
         isLocalDbReadyRef.current = true;
+        let resolvedData: LocalAppState = initialSnapshotState;
         if (result.record && result.record.data && !result.migratedFromLocalStorage) {
+          resolvedData = result.record.data;
           applyLocalAppStateToReact(result.record.data);
+        } else if (result.record && result.record.data) {
+          resolvedData = result.record.data;
         }
         if (result.warningMessage) {
           showToastRef.current(result.warningMessage, 'warning');
         }
+        // Ripristino automatico dell'ultima sessione UI dopo il caricamento dei dati didattici
+        try {
+          const lastSession = await loadLastUiSession();
+          if (!cancelled && lastSession) {
+            applyRestoredUiSessionRef.current(lastSession, resolvedData);
+          }
+        } catch (sessionErr) {
+          console.warn('Avviso ripristino sessione UI:', sessionErr);
+        } finally {
+          if (!cancelled) {
+            isSessionRestoredRef.current = true;
+          }
+        }
       })
-      .catch((err) => {
+      .catch(async (err) => {
         if (cancelled) return;
         isLocalDbReadyRef.current = true;
         console.warn('Avviso avvio database locale:', err);
+        try {
+          const lastSession = await loadLastUiSession();
+          if (!cancelled && lastSession) {
+            applyRestoredUiSessionRef.current(lastSession, initialSnapshotState);
+          }
+        } catch {
+          // fallback silenzioso ai valori predefiniti
+        } finally {
+          if (!cancelled) {
+            isSessionRestoredRef.current = true;
+          }
+        }
       });
 
     return () => {
@@ -802,6 +845,255 @@ const App: React.FC = () => {
            localStorage.getItem('techdraw_last_backup_time') ||
            null;
   });
+
+  // --- RIPRISTINO AUTOMATICO E PERSISTENZA STATO SESSIONE UI ---
+  const [sessionRestoreRevision, setSessionRestoreRevision] = useState(0);
+  const [restoredMobileWeekView, setRestoredMobileWeekView] = useState(false);
+  const [restoredActiveMobileTab, setRestoredActiveMobileTab] = useState<number>(() => {
+    const d = new Date().getDay();
+    return d >= 1 && d <= 5 ? d - 1 : 0;
+  });
+  const [restoredSearchQuery, setRestoredSearchQuery] = useState('');
+  const [restoredSearchSelectedClass, setRestoredSearchSelectedClass] = useState('all');
+  const [restoredRemainingHoursYearId, setRestoredRemainingHoursYearId] = useState<string | null>(null);
+  const [restoredExpandedTaskTemplateId, setRestoredExpandedTaskTemplateId] = useState<string | null>(null);
+  const [restoredGuideOpenSections, setRestoredGuideOpenSections] = useState<Record<string, boolean>>({
+    'registro-classi': true,
+    'collegamento-materie': true
+  });
+  const [restoredGuideSearchQuery, setRestoredGuideSearchQuery] = useState('');
+  const [restoredScrollPositions, setRestoredScrollPositions] = useState<ScrollPositionsMap>({});
+
+  const liveMobileWeekViewRef = useRef(false);
+  const liveActiveMobileTabRef = useRef(restoredActiveMobileTab);
+  const liveSearchQueryRef = useRef('');
+  const liveSearchSelectedClassRef = useRef('all');
+  const liveRemainingHoursYearIdRef = useRef<string | null>(null);
+  const liveExpandedTaskTemplateIdRef = useRef<string | null>(null);
+  const liveGuideOpenSectionsRef = useRef<Record<string, boolean>>({
+    'registro-classi': true,
+    'collegamento-materie': true
+  });
+  const liveGuideSearchQueryRef = useRef('');
+  const liveScrollPositionsRef = useRef<ScrollPositionsMap>({});
+  const sessionPersisterRef = useRef(createUiSessionPersister({ debounceMs: 350 }));
+
+  const currentActiveScreen: ActiveModalScreen = useMemo(() => {
+    if (isAssignmentModalOpen && selectedLesson) return 'assignment';
+    if (isSearchModalOpen) return 'search';
+    if (isRemainingHoursModalOpen) return 'remaining_hours';
+    if (isClassFilterModalOpen) return 'class_filter';
+    if (isTaskDatabaseModalOpen) return 'task_database';
+    if (isGuideModalOpen) return 'guide';
+    if (isBackupModalOpen) return 'backup';
+    if (isSubjectManagerOpen) return 'subjects';
+    if (isStartDateModalOpen) return 'start_date';
+    if (isRecessModalOpen) return 'recess';
+    if (isHoursSettingsModalOpen) return 'hours_settings';
+    if (isProvisionalScheduleModalOpen) return 'provisional_schedule';
+    if (isMonthPickerOpen) return 'month_picker';
+    if (isDayStatusModalOpen && selectedDayStatusDate) return 'day_status';
+    if (isSettingsMenuOpen) return 'settings';
+    return 'schedule';
+  }, [
+    isAssignmentModalOpen, selectedLesson, isSearchModalOpen, isRemainingHoursModalOpen,
+    isClassFilterModalOpen, isTaskDatabaseModalOpen, isGuideModalOpen, isBackupModalOpen,
+    isSubjectManagerOpen, isStartDateModalOpen, isRecessModalOpen, isHoursSettingsModalOpen,
+    isProvisionalScheduleModalOpen, isMonthPickerOpen, isDayStatusModalOpen, selectedDayStatusDate,
+    isSettingsMenuOpen
+  ]);
+
+  const buildCurrentUiSessionState = useCallback((): UiSessionState => {
+    return {
+      schemaVersion: UI_SESSION_SCHEMA_VERSION,
+      updatedAt: Date.now(),
+      activeScreen: currentActiveScreen,
+      currentDateStr: formatLocalDateString(currentDate),
+      focusClass,
+      selectedLessonRef: selectedLesson
+        ? {
+            lessonId: selectedLesson.lesson.id,
+            dateStr: selectedLesson.dateStr,
+            className: selectedLesson.lesson.className,
+            subject: selectedLesson.lesson.subject,
+            day: selectedLesson.lesson.day,
+            hour: selectedLesson.lesson.hour
+          }
+        : null,
+      highlightedLessonId,
+      selectedDayStatusDateStr: selectedDayStatusDate ? formatLocalDateString(selectedDayStatusDate) : null,
+      isMobileWeekView: liveMobileWeekViewRef.current,
+      activeMobileTab: liveActiveMobileTabRef.current,
+      searchQuery: liveSearchQueryRef.current,
+      searchSelectedClass: liveSearchSelectedClassRef.current,
+      remainingHoursYearId: liveRemainingHoursYearIdRef.current,
+      expandedTaskTemplateId: liveExpandedTaskTemplateIdRef.current,
+      guideOpenSections: { ...liveGuideOpenSectionsRef.current },
+      guideSearchQuery: liveGuideSearchQueryRef.current,
+      scrollPositions: { ...liveScrollPositionsRef.current }
+    };
+  }, [
+    currentActiveScreen,
+    currentDate,
+    focusClass,
+    selectedLesson,
+    highlightedLessonId,
+    selectedDayStatusDate
+  ]);
+
+  const buildCurrentUiSessionStateRef = useRef(buildCurrentUiSessionState);
+  useEffect(() => {
+    buildCurrentUiSessionStateRef.current = buildCurrentUiSessionState;
+  }, [buildCurrentUiSessionState]);
+
+  const scheduleCurrentSessionSave = useCallback(() => {
+    if (!isSessionRestoredRef.current) return;
+    sessionPersisterRef.current.scheduleSave(buildCurrentUiSessionStateRef.current());
+  }, []);
+
+  applyRestoredUiSessionRef.current = (rawSession: UiSessionState, loadedData: LocalAppState) => {
+    const resolvedDays = loadedData.isSixDayWeek ? DAYS_SIX : DAYS;
+    const reconciled = reconcileSessionWithAppData(rawSession, {
+      schedule: loadedData.schedule || [],
+      classes: loadedData.classes || [],
+      schoolYears: loadedData.schoolYears || [],
+      taskTemplates: loadedData.taskTemplates || [],
+      visibleDays: resolvedDays
+    });
+    const s = reconciled.session;
+
+    if (reconciled.resolvedCurrentDate) {
+      setCurrentDate(reconciled.resolvedCurrentDate);
+    }
+    setFocusClass(s.focusClass);
+    setHighlightedLessonId(s.highlightedLessonId);
+    if (reconciled.resolvedLesson) {
+      setSelectedLesson(reconciled.resolvedLesson);
+    } else {
+      setSelectedLesson(null);
+    }
+    if (reconciled.resolvedDayStatusDate) {
+      setSelectedDayStatusDate(reconciled.resolvedDayStatusDate);
+    } else {
+      setSelectedDayStatusDate(null);
+    }
+
+    // Ripristina l'eventuale schermata / modale aperta al momento della chiusura
+    setIsAssignmentModalOpen(s.activeScreen === 'assignment' && Boolean(reconciled.resolvedLesson));
+    setIsSettingsMenuOpen(s.activeScreen === 'settings');
+    setIsSearchModalOpen(s.activeScreen === 'search');
+    setIsRemainingHoursModalOpen(s.activeScreen === 'remaining_hours');
+    setIsClassFilterModalOpen(s.activeScreen === 'class_filter');
+    setIsTaskDatabaseModalOpen(s.activeScreen === 'task_database');
+    setIsGuideModalOpen(s.activeScreen === 'guide');
+    setIsBackupModalOpen(s.activeScreen === 'backup');
+    setIsSubjectManagerOpen(s.activeScreen === 'subjects');
+    setIsStartDateModalOpen(s.activeScreen === 'start_date');
+    setIsRecessModalOpen(s.activeScreen === 'recess');
+    setIsHoursSettingsModalOpen(s.activeScreen === 'hours_settings');
+    setIsProvisionalScheduleModalOpen(s.activeScreen === 'provisional_schedule');
+    setIsMonthPickerOpen(s.activeScreen === 'month_picker');
+    setIsDayStatusModalOpen(s.activeScreen === 'day_status' && Boolean(reconciled.resolvedDayStatusDate));
+
+    // Ripristina preferenze UI, filtri, pannelli espansi e posizioni di scorrimento
+    liveMobileWeekViewRef.current = s.isMobileWeekView;
+    liveActiveMobileTabRef.current = s.activeMobileTab;
+    liveSearchQueryRef.current = s.searchQuery;
+    liveSearchSelectedClassRef.current = s.searchSelectedClass;
+    liveRemainingHoursYearIdRef.current = s.remainingHoursYearId;
+    liveExpandedTaskTemplateIdRef.current = s.expandedTaskTemplateId;
+    liveGuideOpenSectionsRef.current = { ...s.guideOpenSections };
+    liveGuideSearchQueryRef.current = s.guideSearchQuery;
+    liveScrollPositionsRef.current = { ...s.scrollPositions };
+
+    setRestoredMobileWeekView(s.isMobileWeekView);
+    setRestoredActiveMobileTab(s.activeMobileTab);
+    setRestoredSearchQuery(s.searchQuery);
+    setRestoredSearchSelectedClass(s.searchSelectedClass);
+    setRestoredRemainingHoursYearId(s.remainingHoursYearId);
+    setRestoredExpandedTaskTemplateId(s.expandedTaskTemplateId);
+    setRestoredGuideOpenSections({ ...s.guideOpenSections });
+    setRestoredGuideSearchQuery(s.guideSearchQuery);
+    setRestoredScrollPositions({ ...s.scrollPositions });
+    setSessionRestoreRevision((prev) => prev + 1);
+  };
+
+  // Salvataggio automatico debounced al variare dello stato UI principale
+  useEffect(() => {
+    if (!isSessionRestoredRef.current) return;
+    sessionPersisterRef.current.scheduleSave(buildCurrentUiSessionState());
+  }, [buildCurrentUiSessionState]);
+
+  // Flush sincrono su chiusura scheda, refresh, cambio visibilità o chiusura browser
+  useEffect(() => {
+    const flushSession = () => {
+      if (!isSessionRestoredRef.current) return;
+      sessionPersisterRef.current.flushNow(buildCurrentUiSessionStateRef.current());
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        flushSession();
+      }
+    };
+
+    window.addEventListener('pagehide', flushSession);
+    window.addEventListener('beforeunload', flushSession);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener('pagehide', flushSession);
+      window.removeEventListener('beforeunload', flushSession);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      sessionPersisterRef.current.cancel();
+    };
+  }, []);
+
+  const handleScheduleUiViewChange = useCallback((view: { isMobileWeekView: boolean; activeMobileTab: number }) => {
+    liveMobileWeekViewRef.current = view.isMobileWeekView;
+    liveActiveMobileTabRef.current = view.activeMobileTab;
+    scheduleCurrentSessionSave();
+  }, [scheduleCurrentSessionSave]);
+
+  const handleScrollPositionChange = useCallback((key: ScrollContainerKey, scrollTop: number) => {
+    liveScrollPositionsRef.current[key] = Math.max(0, Math.round(scrollTop));
+    scheduleCurrentSessionSave();
+  }, [scheduleCurrentSessionSave]);
+
+  const handleSearchFilterChange = useCallback((filters: { query: string; selectedClass: string }) => {
+    liveSearchQueryRef.current = filters.query;
+    liveSearchSelectedClassRef.current = filters.selectedClass;
+    scheduleCurrentSessionSave();
+  }, [scheduleCurrentSessionSave]);
+
+  const handleGuideStateChange = useCallback((guideState: { openSections: Record<string, boolean>; searchQuery: string }) => {
+    liveGuideOpenSectionsRef.current = { ...guideState.openSections };
+    liveGuideSearchQueryRef.current = guideState.searchQuery;
+    scheduleCurrentSessionSave();
+  }, [scheduleCurrentSessionSave]);
+
+  const handleRemainingHoursYearChange = useCallback((yearId: string) => {
+    liveRemainingHoursYearIdRef.current = yearId || null;
+    setRestoredRemainingHoursYearId(yearId || null);
+    scheduleCurrentSessionSave();
+  }, [scheduleCurrentSessionSave]);
+
+  const handleExpandedTaskTemplateChange = useCallback((templateId: string | null) => {
+    liveExpandedTaskTemplateIdRef.current = templateId;
+    setRestoredExpandedTaskTemplateId(templateId);
+    scheduleCurrentSessionSave();
+  }, [scheduleCurrentSessionSave]);
+
+  const handleSearchScrollChange = useCallback((top: number) => {
+    handleScrollPositionChange('searchModal', top);
+  }, [handleScrollPositionChange]);
+
+  const handleRemainingHoursScrollChange = useCallback((top: number) => {
+    handleScrollPositionChange('remainingHoursModal', top);
+  }, [handleScrollPositionChange]);
+
+  const handleGuideScrollChange = useCallback((top: number) => {
+    handleScrollPositionChange('guideModal', top);
+  }, [handleScrollPositionChange]);
 
   const handleDayHeaderClick = (date: Date) => { setSelectedDayStatusDate(date); setIsDayStatusModalOpen(true); };
 
@@ -2636,6 +2928,13 @@ const App: React.FC = () => {
         onToggleVotoStatus={handleToggleVotoStatus}
         onQuickBackup={() => { void handleQuickBackup(false); }}
         isQuickBackupSaving={isQuickBackupSaving}
+        initialMobileWeekView={restoredMobileWeekView}
+        initialActiveMobileTab={restoredActiveMobileTab}
+        sessionRestoreKey={sessionRestoreRevision}
+        initialMobileScrollTop={restoredScrollPositions.scheduleMobileDay || 0}
+        initialDesktopScrollTop={restoredScrollPositions.scheduleDesktopGrid || 0}
+        onUiViewChange={handleScheduleUiViewChange}
+        onScrollPositionChange={handleScrollPositionChange}
       />
       {isAssignmentModalOpen && selectedLesson && (
         <AssignmentModal
@@ -2731,7 +3030,18 @@ const App: React.FC = () => {
         onNavigateToDate={(targetDate) => setCurrentDate(targetDate)}
         onBackupSuccess={setLastBackupTime}
       />
-      <GuideModal isOpen={isGuideModalOpen} onClose={() => setIsGuideModalOpen(false)} onBack={() => { setIsGuideModalOpen(false); setIsSettingsMenuOpen(true); }} installPrompt={installPrompt} />
+      <GuideModal
+        isOpen={isGuideModalOpen}
+        onClose={() => setIsGuideModalOpen(false)}
+        onBack={() => { setIsGuideModalOpen(false); setIsSettingsMenuOpen(true); }}
+        installPrompt={installPrompt}
+        initialOpenSections={restoredGuideOpenSections}
+        initialSearchQuery={restoredGuideSearchQuery}
+        initialScrollTop={restoredScrollPositions.guideModal || 0}
+        sessionRestoreKey={sessionRestoreRevision}
+        onGuideStateChange={handleGuideStateChange}
+        onScrollPositionChange={handleGuideScrollChange}
+      />
       {isEditTimeModalOpen && editingTimeHour !== null && (
         <EditTimeModal
           isOpen={isEditTimeModalOpen}
@@ -2778,7 +3088,20 @@ const App: React.FC = () => {
       />
       <MonthPickerModal isOpen={isMonthPickerOpen} onClose={() => setIsMonthPickerOpen(false)} currentDate={currentDate} onSelectDate={handleSelectMonth} schoolYears={schoolYears} />
       <HoursSettingsModal isOpen={isHoursSettingsModalOpen} onClose={() => setIsHoursSettingsModalOpen(false)} onBack={() => { setIsHoursSettingsModalOpen(false); setIsSettingsMenuOpen(true); }} currentMaxHours={maxHours} onSave={handleSaveMaxHours} />
-      <TaskDatabaseModal isOpen={isTaskDatabaseModalOpen} onClose={() => setIsTaskDatabaseModalOpen(false)} onBack={() => { setIsTaskDatabaseModalOpen(false); setIsSettingsMenuOpen(true); }} templates={taskTemplates} classes={activeClasses} onSave={handleSaveTaskTemplates} />
+      <TaskDatabaseModal
+        isOpen={isTaskDatabaseModalOpen}
+        onClose={() => setIsTaskDatabaseModalOpen(false)}
+        onBack={() => { setIsTaskDatabaseModalOpen(false); setIsSettingsMenuOpen(true); }}
+        templates={taskTemplates}
+        classes={activeClasses}
+        onSave={handleSaveTaskTemplates}
+        initialExpandedTemplateId={restoredExpandedTaskTemplateId}
+        initialScrollTop={restoredScrollPositions.taskDatabaseModal || 0}
+        initialExpandedScrollTop={restoredScrollPositions.taskDatabaseExpanded || 0}
+        sessionRestoreKey={sessionRestoreRevision}
+        onExpandedTemplateChange={handleExpandedTaskTemplateChange}
+        onScrollPositionChange={handleScrollPositionChange}
+      />
       <SettingsMenuModal 
         isOpen={isSettingsMenuOpen} 
         onClose={() => setIsSettingsMenuOpen(false)} 
@@ -2803,7 +3126,20 @@ const App: React.FC = () => {
         defaultTimeSlots={timeSlots}
         maxHours={maxHours}
       />
-      <SearchModal isOpen={isSearchModalOpen} onClose={() => setIsSearchModalOpen(false)} notes={lessonNotes} schedule={schedule} classes={activeClasses} onGoToNote={handleGoToNote} />
+      <SearchModal
+        isOpen={isSearchModalOpen}
+        onClose={() => setIsSearchModalOpen(false)}
+        notes={lessonNotes}
+        schedule={schedule}
+        classes={activeClasses}
+        onGoToNote={handleGoToNote}
+        initialQuery={restoredSearchQuery}
+        initialSelectedClass={restoredSearchSelectedClass}
+        initialScrollTop={restoredScrollPositions.searchModal || 0}
+        sessionRestoreKey={sessionRestoreRevision}
+        onFilterChange={handleSearchFilterChange}
+        onScrollPositionChange={handleSearchScrollChange}
+      />
       <RemainingHoursModal 
         isOpen={isRemainingHoursModalOpen} 
         onClose={() => setIsRemainingHoursModalOpen(false)} 
@@ -2824,6 +3160,11 @@ const App: React.FC = () => {
         provisionalPeriods={provisionalPeriods}
         maxHours={maxHours}
         initialSchoolYearId={activeSchoolYear?.id}
+        restoredSelectedYearId={restoredRemainingHoursYearId}
+        initialScrollTop={restoredScrollPositions.remainingHoursModal || 0}
+        sessionRestoreKey={sessionRestoreRevision}
+        onSelectedYearChange={handleRemainingHoursYearChange}
+        onScrollPositionChange={handleRemainingHoursScrollChange}
         classes={activeClasses}
         schoolEndDate={schoolEndDate}
       />

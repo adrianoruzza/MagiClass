@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   X, Calendar, CheckSquare, Palette, HardDrive, Smartphone, 
   RefreshCw, ChevronDown, ChevronUp, CheckCircle2, Download, 
@@ -11,19 +11,71 @@ import {
 import AppIcon from './AppIcon';
 import { APP_VERSION, APP_RELEASE_DATE as APP_DATE } from '../constants';
 
+const DEFAULT_GUIDE_OPEN_SECTIONS: Record<string, boolean> = {
+  'registro-classi': true,
+  'collegamento-materie': true
+};
+
 interface GuideModalProps {
   isOpen: boolean;
   onClose: () => void;
   onBack?: () => void;
   installPrompt?: any;
+  initialOpenSections?: Record<string, boolean>;
+  initialSearchQuery?: string;
+  initialScrollTop?: number;
+  sessionRestoreKey?: number;
+  onGuideStateChange?: (state: { openSections: Record<string, boolean>; searchQuery: string }) => void;
+  onScrollPositionChange?: (scrollTop: number) => void;
 }
 
-const GuideModal: React.FC<GuideModalProps> = ({ isOpen, onClose, onBack, installPrompt: _installPrompt }) => {
-  const [openSections, setOpenSections] = useState<Record<string, boolean>>({
-    'registro-classi': true,
-    'collegamento-materie': true
-  });
-  const [searchQuery, setSearchQuery] = useState('');
+const GuideModal: React.FC<GuideModalProps> = ({
+  isOpen,
+  onClose,
+  onBack,
+  installPrompt: _installPrompt,
+  initialOpenSections,
+  initialSearchQuery = '',
+  initialScrollTop = 0,
+  sessionRestoreKey = 0,
+  onGuideStateChange,
+  onScrollPositionChange
+}) => {
+  const [openSections, setOpenSections] = useState<Record<string, boolean>>(() =>
+    initialOpenSections && Object.keys(initialOpenSections).length > 0
+      ? initialOpenSections
+      : DEFAULT_GUIDE_OPEN_SECTIONS
+  );
+  const [searchQuery, setSearchQuery] = useState(initialSearchQuery);
+  const bodyScrollRef = useRef<HTMLDivElement | null>(null);
+  const lastRestoreKeyRef = useRef<number>(0);
+
+  useEffect(() => {
+    if (!sessionRestoreKey || sessionRestoreKey === lastRestoreKeyRef.current) return;
+    lastRestoreKeyRef.current = sessionRestoreKey;
+    if (initialOpenSections) {
+      setOpenSections(
+        Object.keys(initialOpenSections).length > 0 ? initialOpenSections : {}
+      );
+    }
+    setSearchQuery(initialSearchQuery);
+  }, [sessionRestoreKey, initialOpenSections, initialSearchQuery]);
+
+  useEffect(() => {
+    if (onGuideStateChange) {
+      onGuideStateChange({ openSections, searchQuery });
+    }
+  }, [openSections, searchQuery, onGuideStateChange]);
+
+  useEffect(() => {
+    if (!isOpen || !initialScrollTop) return;
+    const frame = requestAnimationFrame(() => {
+      if (bodyScrollRef.current) {
+        bodyScrollRef.current.scrollTop = initialScrollTop;
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [isOpen, sessionRestoreKey]);
 
   if (!isOpen) return null;
 
@@ -126,7 +178,11 @@ const GuideModal: React.FC<GuideModalProps> = ({ isOpen, onClose, onBack, instal
         </div>
 
         {/* Body */}
-        <div className="flex-1 overflow-y-auto bg-slate-50/60 scrollbar-thin">
+        <div
+          ref={bodyScrollRef}
+          onScroll={onScrollPositionChange ? (e) => onScrollPositionChange(e.currentTarget.scrollTop) : undefined}
+          className="flex-1 overflow-y-auto bg-slate-50/60 scrollbar-thin"
+        >
             
           {/* App Hero Badge */}
           <div className="bg-white border-b border-slate-200 p-5 sm:p-6 flex flex-col sm:flex-row items-center gap-4 text-center sm:text-left">

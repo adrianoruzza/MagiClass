@@ -55,6 +55,13 @@ interface ScheduleViewProps {
   onToggleVotoStatus: (lessonId: string, dateStr: string) => void;
   onQuickBackup?: () => void;
   isQuickBackupSaving?: boolean;
+  initialMobileWeekView?: boolean;
+  initialActiveMobileTab?: number;
+  sessionRestoreKey?: number;
+  initialMobileScrollTop?: number;
+  initialDesktopScrollTop?: number;
+  onUiViewChange?: (state: { isMobileWeekView: boolean; activeMobileTab: number }) => void;
+  onScrollPositionChange?: (key: 'scheduleMobileDay' | 'scheduleDesktopGrid', scrollTop: number) => void;
 }
 
 const getLocalDateKey = (d: Date) => {
@@ -274,16 +281,31 @@ const ScheduleView: React.FC<ScheduleViewProps> = ({
   onToggleREStatus,
   onToggleVotoStatus,
   onQuickBackup,
-  isQuickBackupSaving = false
+  isQuickBackupSaving = false,
+  initialMobileWeekView,
+  initialActiveMobileTab,
+  sessionRestoreKey = 0,
+  initialMobileScrollTop = 0,
+  initialDesktopScrollTop = 0,
+  onUiViewChange,
+  onScrollPositionChange
 }) => {
   const hoursArray = useMemo(() => Array.from({ length: maxHours }, (_, i) => i + 1), [maxHours]);
 
   const [activeMobileTab, setActiveMobileTab] = useState<number>(() => {
+    if (typeof initialActiveMobileTab === 'number' && initialActiveMobileTab >= 0 && initialActiveMobileTab < activeDays.length) {
+      return initialActiveMobileTab;
+    }
     const day = currentDate.getDay(); 
     const idx = day - 1; 
     return (idx >= 0 && idx < activeDays.length) ? idx : 0;
   });
-  const [isMobileWeekView, setIsMobileWeekView] = useState(false);
+  const [isMobileWeekView, setIsMobileWeekView] = useState<boolean>(Boolean(initialMobileWeekView));
+
+  const mobileDayScrollRef = useRef<HTMLDivElement | null>(null);
+  const desktopGridScrollRef = useRef<HTMLDivElement | null>(null);
+  const lastAppliedSessionKeyRef = useRef<number>(0);
+  const skipNextDateTabSyncRef = useRef<boolean>(false);
 
   const [swipeOffset, setSwipeOffset] = useState(0);
   const [isSwiping, setIsSwiping] = useState(false);
@@ -307,7 +329,36 @@ const ScheduleView: React.FC<ScheduleViewProps> = ({
       status: 'done' | 'not_done' | 'pending' | 'none';
   } | null>(null);
 
+  // Applica lo stato di visualizzazione e scorrimento ripristinato dalla sessione precedente
   useEffect(() => {
+    if (!sessionRestoreKey || sessionRestoreKey === lastAppliedSessionKeyRef.current) return;
+    lastAppliedSessionKeyRef.current = sessionRestoreKey;
+
+    if (typeof initialMobileWeekView === 'boolean') {
+      setIsMobileWeekView(initialMobileWeekView);
+    }
+    if (typeof initialActiveMobileTab === 'number' && initialActiveMobileTab >= 0 && initialActiveMobileTab < activeDays.length) {
+      skipNextDateTabSyncRef.current = true;
+      setActiveMobileTab(initialActiveMobileTab);
+    }
+
+    const restoreFrame = requestAnimationFrame(() => {
+      if (mobileDayScrollRef.current && initialMobileScrollTop > 0) {
+        mobileDayScrollRef.current.scrollTop = initialMobileScrollTop;
+      }
+      if (desktopGridScrollRef.current && initialDesktopScrollTop > 0) {
+        desktopGridScrollRef.current.scrollTop = initialDesktopScrollTop;
+      }
+    });
+
+    return () => cancelAnimationFrame(restoreFrame);
+  }, [sessionRestoreKey, initialMobileWeekView, initialActiveMobileTab, initialMobileScrollTop, initialDesktopScrollTop, activeDays.length]);
+
+  useEffect(() => {
+    if (skipNextDateTabSyncRef.current) {
+      skipNextDateTabSyncRef.current = false;
+      return;
+    }
     const day = currentDate.getDay();
     let targetIdx = 0;
     
@@ -322,6 +373,12 @@ const ScheduleView: React.FC<ScheduleViewProps> = ({
     
     setActiveMobileTab(targetIdx);
   }, [currentDate, activeDays]);
+
+  useEffect(() => {
+    if (onUiViewChange) {
+      onUiViewChange({ isMobileWeekView, activeMobileTab });
+    }
+  }, [isMobileWeekView, activeMobileTab, onUiViewChange]);
 
   const handleDragStart = (e: React.DragEvent, lessonId: string, sourceDateStr: string) => {
       e.dataTransfer.setData("text/plain", lessonId);
@@ -1053,7 +1110,7 @@ const ScheduleView: React.FC<ScheduleViewProps> = ({
       );
   };
 
-  const renderMobileDayContent = (tabIndex: number, date: Date) => {
+  const renderMobileDayContent = (tabIndex: number, date: Date, isCurrentPanel: boolean = false) => {
       const isToday = date.toDateString() === new Date().toDateString();
       const isPast = isDatePast(date);
       const dayName = activeDays[tabIndex]; 
@@ -1102,7 +1159,11 @@ const ScheduleView: React.FC<ScheduleViewProps> = ({
       }
 
       return (
-          <div className={`w-full h-full flex flex-col overflow-y-auto bg-white border-r border-slate-200 flex-shrink-0 ${isPast ? 'opacity-70 grayscale' : ''}`}>
+          <div
+            ref={isCurrentPanel ? mobileDayScrollRef : undefined}
+            onScroll={isCurrentPanel && onScrollPositionChange ? (e) => onScrollPositionChange('scheduleMobileDay', e.currentTarget.scrollTop) : undefined}
+            className={`w-full h-full flex flex-col overflow-y-auto bg-white border-r border-slate-200 flex-shrink-0 ${isPast ? 'opacity-70 grayscale' : ''}`}
+          >
              <div 
                 className={`py-1 px-2.5 sm:py-1.5 sm:px-3 flex items-center justify-between border-b border-slate-200 cursor-pointer shrink-0 ${isToday ? 'bg-primary/5' : 'bg-slate-50'}`}
                 onClick={() => onDayHeaderClick(date)}
@@ -2000,7 +2061,11 @@ const ScheduleView: React.FC<ScheduleViewProps> = ({
           })}
         </div>
 
-        <div className="flex-1 min-h-0 overflow-hidden flex flex-col bg-slate-50/30">
+        <div
+          ref={desktopGridScrollRef}
+          onScroll={onScrollPositionChange ? (e) => onScrollPositionChange('scheduleDesktopGrid', e.currentTarget.scrollTop) : undefined}
+          className="flex-1 min-h-0 overflow-hidden flex flex-col bg-slate-50/30"
+        >
           {(() => {
              const anyRowHasLessons = hoursArray.some(h => 
                  weekDates.some((date, dayIdx) => {
@@ -2358,13 +2423,13 @@ const ScheduleView: React.FC<ScheduleViewProps> = ({
                     }}
                 >
                     <div className="w-1/3 h-full flex-shrink-0">
-                        {renderMobileDayContent(mobilePanels.prev.idx, mobilePanels.prev.date)}
+                        {renderMobileDayContent(mobilePanels.prev.idx, mobilePanels.prev.date, false)}
                     </div>
                     <div className="w-1/3 h-full flex-shrink-0 relative shadow-xl z-10">
-                         {renderMobileDayContent(mobilePanels.curr.idx, mobilePanels.curr.date)}
+                         {renderMobileDayContent(mobilePanels.curr.idx, mobilePanels.curr.date, true)}
                     </div>
                     <div className="w-1/3 h-full flex-shrink-0">
-                        {renderMobileDayContent(mobilePanels.next.idx, mobilePanels.next.date)}
+                        {renderMobileDayContent(mobilePanels.next.idx, mobilePanels.next.date, false)}
                     </div>
                 </div>
             </div>

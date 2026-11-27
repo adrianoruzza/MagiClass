@@ -13,12 +13,14 @@ import {
 } from '../types';
 
 export const LOCAL_DB_NAME = 'magiclass_local_db';
-export const LOCAL_DB_VERSION = 1;
+export const LOCAL_DB_VERSION = 2;
 export const LOCAL_DB_SCHEMA_VERSION = 2;
 
 const STORE_APP_STATE = 'app_state';
 const STORE_SNAPSHOTS = 'snapshots';
+const STORE_UI_SESSION = 'ui_session';
 const PRIMARY_STATE_KEY = 'current_state';
+const UI_SESSION_KEY = 'last_ui_session';
 const MAX_SNAPSHOTS = 5;
 
 const LEGACY_CLOUD_DB_NAME = 'magiclass_secure_vault';
@@ -320,6 +322,9 @@ const openLocalDatabase = (): Promise<IDBDatabase> => {
         if (!db.objectStoreNames.contains(STORE_SNAPSHOTS)) {
           const snapshotStore = db.createObjectStore(STORE_SNAPSHOTS, { keyPath: 'id' });
           snapshotStore.createIndex('createdAt', 'createdAt', { unique: false });
+        }
+        if (!db.objectStoreNames.contains(STORE_UI_SESSION)) {
+          db.createObjectStore(STORE_UI_SESSION, { keyPath: 'id' });
         }
       };
 
@@ -686,3 +691,86 @@ export const getLocalStorageEstimate = async (): Promise<{ usageBytes: number; q
   }
   return null;
 };
+
+/**
+ * Legge lo stato temporaneo della sessione UI dallo store separato `ui_session`
+ * all'interno del database locale esistente (`magiclass_local_db`).
+ * Non interferisce in alcun modo con i dati didattici permanenti (`app_state` e `snapshots`).
+ */
+export const loadUiSessionRecordFromLocalDb = async <T = unknown>(): Promise<T | null> => {
+  if (!isIndexedDBAvailable()) return null;
+  try {
+    const db = await openLocalDatabase();
+    if (!db.objectStoreNames.contains(STORE_UI_SESSION)) return null;
+    return await new Promise<T | null>((resolve) => {
+      try {
+        const tx = db.transaction(STORE_UI_SESSION, 'readonly');
+        const store = tx.objectStore(STORE_UI_SESSION);
+        const req = store.get(UI_SESSION_KEY);
+        req.onsuccess = () => {
+          const record = req.result as { id: string; payload?: T } | undefined;
+          resolve(record && record.payload !== undefined ? record.payload : null);
+        };
+        req.onerror = () => resolve(null);
+      } catch {
+        resolve(null);
+      }
+    });
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Salva lo stato temporaneo della sessione UI nello store separato `ui_session`.
+ */
+export const saveUiSessionRecordToLocalDb = async <T>(payload: T): Promise<boolean> => {
+  if (!isIndexedDBAvailable()) return false;
+  try {
+    const db = await openLocalDatabase();
+    if (!db.objectStoreNames.contains(STORE_UI_SESSION)) return false;
+    return await new Promise<boolean>((resolve) => {
+      try {
+        const tx = db.transaction(STORE_UI_SESSION, 'readwrite');
+        const store = tx.objectStore(STORE_UI_SESSION);
+        store.put({
+          id: UI_SESSION_KEY,
+          payload
+        });
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => resolve(false);
+        tx.onabort = () => resolve(false);
+      } catch {
+        resolve(false);
+      }
+    });
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Rimuove lo stato temporaneo della sessione UI dallo store `ui_session`.
+ */
+export const clearUiSessionRecordFromLocalDb = async (): Promise<boolean> => {
+  if (!isIndexedDBAvailable()) return false;
+  try {
+    const db = await openLocalDatabase();
+    if (!db.objectStoreNames.contains(STORE_UI_SESSION)) return false;
+    return await new Promise<boolean>((resolve) => {
+      try {
+        const tx = db.transaction(STORE_UI_SESSION, 'readwrite');
+        const store = tx.objectStore(STORE_UI_SESSION);
+        store.delete(UI_SESSION_KEY);
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => resolve(false);
+        tx.onabort = () => resolve(false);
+      } catch {
+        resolve(false);
+      }
+    });
+  } catch {
+    return false;
+  }
+};
+

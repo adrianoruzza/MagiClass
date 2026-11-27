@@ -41,6 +41,11 @@ interface RemainingHoursModalProps {
   remainingDays?: number;
   endDate?: Date;
   schoolEndDate?: Date;
+  restoredSelectedYearId?: string | null;
+  initialScrollTop?: number;
+  sessionRestoreKey?: number;
+  onSelectedYearChange?: (yearId: string) => void;
+  onScrollPositionChange?: (scrollTop: number) => void;
 }
 
 const formatDateDisplay = (dateStr?: string) => {
@@ -63,7 +68,12 @@ const RemainingHoursModal: React.FC<RemainingHoursModalProps> = ({
   timeSlots,
   provisionalPeriods,
   maxHours,
-  initialSchoolYearId
+  initialSchoolYearId,
+  restoredSelectedYearId,
+  initialScrollTop = 0,
+  sessionRestoreKey = 0,
+  onSelectedYearChange,
+  onScrollPositionChange
 }) => {
   // Trova l'anno scolastico in corso in base alla data locale odierna
   const currentSchoolYear = useMemo(() => {
@@ -74,17 +84,45 @@ const RemainingHoursModal: React.FC<RemainingHoursModalProps> = ({
 
   // Stato per l'anno scolastico selezionato nel menu
   const [selectedYearId, setSelectedYearId] = useState<string>(() => {
-    return initialSchoolYearId || currentSchoolYear?.id || (schoolYears && schoolYears[0]?.id) || '';
+    return restoredSelectedYearId || initialSchoolYearId || currentSchoolYear?.id || (schoolYears && schoolYears[0]?.id) || '';
   });
+
+  const bodyScrollRef = useRef<HTMLDivElement | null>(null);
+  const lastRestoreKeyRef = useRef<number>(0);
+
+  useEffect(() => {
+    if (!sessionRestoreKey || sessionRestoreKey === lastRestoreKeyRef.current) return;
+    lastRestoreKeyRef.current = sessionRestoreKey;
+    if (restoredSelectedYearId) {
+      setSelectedYearId(restoredSelectedYearId);
+    }
+  }, [sessionRestoreKey, restoredSelectedYearId]);
 
   const prevIsOpenRef = useRef(false);
   useEffect(() => {
     if (isOpen && !prevIsOpenRef.current) {
-      const preferredId = initialSchoolYearId || currentSchoolYear?.id || (schoolYears && schoolYears[0]?.id) || '';
+      const preferredId = restoredSelectedYearId || initialSchoolYearId || currentSchoolYear?.id || (schoolYears && schoolYears[0]?.id) || '';
       setSelectedYearId(preferredId);
     }
     prevIsOpenRef.current = isOpen;
-  }, [isOpen, initialSchoolYearId, currentSchoolYear, schoolYears]);
+  }, [isOpen, restoredSelectedYearId, initialSchoolYearId, currentSchoolYear, schoolYears]);
+
+  useEffect(() => {
+    if (!isOpen || !initialScrollTop) return;
+    const frame = requestAnimationFrame(() => {
+      if (bodyScrollRef.current) {
+        bodyScrollRef.current.scrollTop = initialScrollTop;
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [isOpen, sessionRestoreKey]);
+
+  const handleSelectYear = (yearId: string) => {
+    setSelectedYearId(yearId);
+    if (onSelectedYearChange) {
+      onSelectedYearChange(yearId);
+    }
+  };
 
   // Oggetto anno scolastico selezionato
   const selectedYear = useMemo(() => {
@@ -194,7 +232,7 @@ const RemainingHoursModal: React.FC<RemainingHoursModalProps> = ({
                 <select
                   id="school-year-select"
                   value={selectedYear?.id || ''}
-                  onChange={(e) => setSelectedYearId(e.target.value)}
+                  onChange={(e) => handleSelectYear(e.target.value)}
                   className="appearance-none bg-white border border-slate-200 rounded-lg px-2.5 py-1 pr-7 text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-primary/20 shadow-xs cursor-pointer hover:border-slate-300 transition-colors"
                 >
                   {schoolYears.map(y => {
@@ -213,7 +251,11 @@ const RemainingHoursModal: React.FC<RemainingHoursModalProps> = ({
         )}
 
         {/* Body */}
-        <div className="flex-1 overflow-y-auto px-3.5 sm:px-5 py-2.5 space-y-3 scrollbar-thin">
+        <div
+          ref={bodyScrollRef}
+          onScroll={onScrollPositionChange ? (e) => onScrollPositionChange(e.currentTarget.scrollTop) : undefined}
+          className="flex-1 overflow-y-auto px-3.5 sm:px-5 py-2.5 space-y-3 scrollbar-thin"
+        >
           
           {/* Avviso Orario Provvisorio in vigore */}
           {stats.hasActiveProvisionalPeriod && (

@@ -10,6 +10,12 @@ interface TaskDatabaseModalProps {
   templates: TaskTemplate[];
   classes: ClassEntity[];
   onSave: (templates: TaskTemplate[]) => void;
+  initialExpandedTemplateId?: string | null;
+  initialScrollTop?: number;
+  initialExpandedScrollTop?: number;
+  sessionRestoreKey?: number;
+  onExpandedTemplateChange?: (templateId: string | null) => void;
+  onScrollPositionChange?: (key: 'taskDatabaseModal' | 'taskDatabaseExpanded', scrollTop: number) => void;
 }
 
 const TaskDatabaseModal: React.FC<TaskDatabaseModalProps> = ({
@@ -18,12 +24,38 @@ const TaskDatabaseModal: React.FC<TaskDatabaseModalProps> = ({
   onBack,
   templates,
   classes,
-  onSave
+  onSave,
+  initialExpandedTemplateId = null,
+  initialScrollTop = 0,
+  initialExpandedScrollTop = 0,
+  sessionRestoreKey = 0,
+  onExpandedTemplateChange,
+  onScrollPositionChange
 }) => {
   const [localTemplates, setLocalTemplates] = useState<TaskTemplate[]>(() => JSON.parse(JSON.stringify(templates || [])));
-  const [expandedTemplateId, setExpandedTemplateId] = useState<string | null>(null);
+  const [expandedTemplateId, setExpandedTemplateId] = useState<string | null>(initialExpandedTemplateId);
   const hasLocalEditsRef = useRef(false);
   const wasOpenRef = useRef(isOpen);
+  const listScrollRef = useRef<HTMLDivElement | null>(null);
+  const expandedScrollRef = useRef<HTMLDivElement | null>(null);
+  const lastRestoreKeyRef = useRef<number>(0);
+
+  const updateExpandedTemplateId = (id: string | null) => {
+    setExpandedTemplateId(id);
+    if (onExpandedTemplateChange) {
+      onExpandedTemplateChange(id);
+    }
+  };
+
+  useEffect(() => {
+    if (!sessionRestoreKey || sessionRestoreKey === lastRestoreKeyRef.current) return;
+    lastRestoreKeyRef.current = sessionRestoreKey;
+    if (initialExpandedTemplateId && (templates || []).some(t => t.id === initialExpandedTemplateId)) {
+      setExpandedTemplateId(initialExpandedTemplateId);
+    } else {
+      setExpandedTemplateId(null);
+    }
+  }, [sessionRestoreKey, initialExpandedTemplateId, templates]);
 
   useEffect(() => {
     const justOpened = isOpen && !wasOpenRef.current;
@@ -40,10 +72,27 @@ const TaskDatabaseModal: React.FC<TaskDatabaseModalProps> = ({
       hasLocalEditsRef.current = false;
       setLocalTemplates(JSON.parse(JSON.stringify(templates || [])));
       if (justOpened) {
-        setExpandedTemplateId(null);
+        const validRestoredId =
+          initialExpandedTemplateId && (templates || []).some(t => t.id === initialExpandedTemplateId)
+            ? initialExpandedTemplateId
+            : null;
+        setExpandedTemplateId(validRestoredId);
       }
     }
-  }, [isOpen, templates]);
+  }, [isOpen, templates, initialExpandedTemplateId]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const frame = requestAnimationFrame(() => {
+      if (listScrollRef.current && initialScrollTop > 0) {
+        listScrollRef.current.scrollTop = initialScrollTop;
+      }
+      if (expandedScrollRef.current && initialExpandedScrollTop > 0) {
+        expandedScrollRef.current.scrollTop = initialExpandedScrollTop;
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [isOpen, expandedTemplateId, sessionRestoreKey]);
 
   if (!isOpen) return null;
 
@@ -63,6 +112,9 @@ const TaskDatabaseModal: React.FC<TaskDatabaseModalProps> = ({
     if (confirm('Eliminare questo gruppo di compiti?')) {
         hasLocalEditsRef.current = true;
         setLocalTemplates(localTemplates.filter(t => t.id !== id));
+        if (expandedTemplateId === id) {
+          updateExpandedTemplateId(null);
+        }
     }
   };
 
@@ -90,6 +142,9 @@ const TaskDatabaseModal: React.FC<TaskDatabaseModalProps> = ({
     if (hasLocalEditsRef.current || JSON.stringify(localTemplates) !== JSON.stringify(templates || [])) {
       onSave(localTemplates);
     }
+    if (expandedTemplateId !== null) {
+      updateExpandedTemplateId(null);
+    }
     if (isBack && onBack) {
       onBack();
     } else {
@@ -109,7 +164,7 @@ const TaskDatabaseModal: React.FC<TaskDatabaseModalProps> = ({
         />
         <div className="flex items-center gap-1">
           <button 
-            onClick={() => setExpandedTemplateId(template.id)}
+            onClick={() => updateExpandedTemplateId(template.id)}
             className="p-2 text-slate-400 hover:text-blue-500 hover:bg-blue-50 rounded-xl transition-all magi-press"
             title="Espandi editing"
           >
@@ -190,7 +245,11 @@ const TaskDatabaseModal: React.FC<TaskDatabaseModalProps> = ({
         </div>
 
         {/* Body */}
-        <div className="p-6 overflow-y-auto flex-1 space-y-6 scrollbar-thin bg-slate-50">
+        <div
+          ref={listScrollRef}
+          onScroll={onScrollPositionChange ? (e) => onScrollPositionChange('taskDatabaseModal', e.currentTarget.scrollTop) : undefined}
+          className="p-6 overflow-y-auto flex-1 space-y-6 scrollbar-thin bg-slate-50"
+        >
           <p className="text-sm text-slate-500 font-medium">
             Configura dei set di compiti predefiniti. Inserisci una riga vuota per distinguere compiti diversi.
           </p>
@@ -229,13 +288,17 @@ const TaskDatabaseModal: React.FC<TaskDatabaseModalProps> = ({
                         Editor Espanso
                     </h3>
                     <button 
-                        onClick={() => setExpandedTemplateId(null)}
+                        onClick={() => updateExpandedTemplateId(null)}
                         className="p-2 bg-slate-700 hover:bg-slate-600 rounded-full transition-all magi-press"
                     >
                         <Minimize2 className="w-6 h-6" />
                     </button>
                 </div>
-                <div className="flex-1 p-6 flex flex-col gap-6 overflow-y-auto bg-slate-50">
+                <div
+                  ref={expandedScrollRef}
+                  onScroll={onScrollPositionChange ? (e) => onScrollPositionChange('taskDatabaseExpanded', e.currentTarget.scrollTop) : undefined}
+                  className="flex-1 p-6 flex flex-col gap-6 overflow-y-auto bg-slate-50"
+                >
                     {localTemplates.filter(t => t.id === expandedTemplateId).map(template => (
                         <React.Fragment key={template.id}>
                             <div className="shrink-0">

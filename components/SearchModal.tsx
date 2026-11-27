@@ -1,5 +1,5 @@
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { X, Search, Filter, ArrowRight, Clock } from 'lucide-react';
 import { Lesson, LessonNote, ClassEntity } from '../types';
 
@@ -10,6 +10,12 @@ interface SearchModalProps {
   schedule: Lesson[];
   classes: ClassEntity[];
   onGoToNote: (dateStr: string, lessonId: string) => void;
+  initialQuery?: string;
+  initialSelectedClass?: string;
+  initialScrollTop?: number;
+  sessionRestoreKey?: number;
+  onFilterChange?: (filters: { query: string; selectedClass: string }) => void;
+  onScrollPositionChange?: (scrollTop: number) => void;
 }
 
 const SearchModal: React.FC<SearchModalProps> = ({
@@ -18,10 +24,41 @@ const SearchModal: React.FC<SearchModalProps> = ({
   notes,
   schedule,
   classes,
-  onGoToNote
+  onGoToNote,
+  initialQuery = '',
+  initialSelectedClass = 'all',
+  initialScrollTop = 0,
+  sessionRestoreKey = 0,
+  onFilterChange,
+  onScrollPositionChange
 }) => {
-  const [query, setQuery] = useState('');
-  const [selectedClass, setSelectedClass] = useState<string>('all');
+  const [query, setQuery] = useState(initialQuery);
+  const [selectedClass, setSelectedClass] = useState<string>(initialSelectedClass || 'all');
+  const resultsScrollRef = useRef<HTMLDivElement | null>(null);
+  const lastRestoreKeyRef = useRef<number>(0);
+
+  useEffect(() => {
+    if (!sessionRestoreKey || sessionRestoreKey === lastRestoreKeyRef.current) return;
+    lastRestoreKeyRef.current = sessionRestoreKey;
+    setQuery(initialQuery);
+    setSelectedClass(initialSelectedClass || 'all');
+  }, [sessionRestoreKey, initialQuery, initialSelectedClass]);
+
+  useEffect(() => {
+    if (onFilterChange) {
+      onFilterChange({ query, selectedClass });
+    }
+  }, [query, selectedClass, onFilterChange]);
+
+  useEffect(() => {
+    if (!isOpen || !initialScrollTop) return;
+    const frame = requestAnimationFrame(() => {
+      if (resultsScrollRef.current) {
+        resultsScrollRef.current.scrollTop = initialScrollTop;
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [isOpen, sessionRestoreKey]);
 
   const filteredResults = useMemo(() => {
     if (!isOpen) return [];
@@ -103,7 +140,11 @@ const SearchModal: React.FC<SearchModalProps> = ({
         </div>
 
         {/* Results List */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50 scrollbar-thin">
+        <div
+          ref={resultsScrollRef}
+          onScroll={onScrollPositionChange ? (e) => onScrollPositionChange(e.currentTarget.scrollTop) : undefined}
+          className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50 scrollbar-thin"
+        >
           {filteredResults.length > 0 ? (
             filteredResults.map(({ note, lesson }, idx) => (
               <button
