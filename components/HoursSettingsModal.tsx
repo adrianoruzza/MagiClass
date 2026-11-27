@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { X, Clock, CheckCircle2, ChevronLeft } from 'lucide-react';
 
 interface HoursSettingsModalProps {
@@ -18,6 +18,12 @@ const HoursSettingsModal: React.FC<HoursSettingsModalProps> = ({
   onSave,
 }) => {
   const [selectedHours, setSelectedHours] = useState(currentMaxHours);
+
+  useEffect(() => {
+    if (isOpen) {
+      setSelectedHours(currentMaxHours);
+    }
+  }, [isOpen, currentMaxHours]);
 
   if (!isOpen) return null;
 

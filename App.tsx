@@ -39,8 +39,10 @@ import { applyLessonRepetition, isDisposizioneLesson } from './utils/repetitionU
 import { findNoteIndexForLesson, normalizeNoteDate, hasMeaningfulNoteContent } from './utils/noteLookup';
 import {
   LocalAppState,
+  PersistenceStatusInfo,
   initAndLoadLocalDatabase,
   saveAppStateToLocalDb,
+  flushAppStateMirrorSync,
   createLocalSnapshot,
   getSnapshotById,
   safeSetLocalStorageItem
@@ -340,8 +342,9 @@ const App: React.FC = () => {
   }, [schedule, lessonNotes, specialDays, schoolClosures, timeSlots, recesses, subjects, classes, durations, maxHours, schoolStartDate, schoolEndDate, semesterSplitDate, isSixDayWeek, schoolYears, taskTemplates, provisionalPeriods, linkedSubjectGroups]);
 
   useEffect(() => {
-    if (isNavigatingHistoryRef.current) return;
+    if (isNavigatingHistoryRef.current || !isLocalDbReadyRef.current) return;
     const timer = setTimeout(() => {
+        if (isNavigatingHistoryRef.current || !isLocalDbReadyRef.current) return;
         const snapshot = createSnapshot();
         const snapStr = JSON.stringify(snapshot);
         if (lastSnapshotStrRef.current === snapStr) return;
@@ -363,19 +366,13 @@ const App: React.FC = () => {
     return () => clearTimeout(timer);
   }, [schedule, lessonNotes, specialDays, schoolClosures, timeSlots, durations, recesses, subjects, classes, maxHours, schoolStartDate, schoolEndDate, semesterSplitDate, isSixDayWeek, schoolYears, taskTemplates, provisionalPeriods, linkedSubjectGroups]);
 
-  useEffect(() => {
-      if (history.length === 0) {
-          const initSnapshot = createSnapshot();
-          lastSnapshotStrRef.current = JSON.stringify(initSnapshot);
-          setHistory([initSnapshot]);
-          setHistoryIndex(0);
-          historyIndexRef.current = 0;
-      }
-  }, []);
-
   const applySnapshot = useCallback((snapshot: AppStateSnapshot) => {
       isNavigatingHistoryRef.current = true;
       lastSnapshotStrRef.current = JSON.stringify(snapshot);
+      const nextStartDate = new Date(snapshot.schoolStartDate);
+      const nextEndDate = snapshot.schoolEndDate ? new Date(snapshot.schoolEndDate) : null;
+      const nextSplitDate = new Date(snapshot.semesterSplitDate);
+
       setSchedule(snapshot.schedule);
       setLessonNotes(snapshot.lessonNotes);
       setSpecialDays(snapshot.specialDays);
@@ -387,13 +384,37 @@ const App: React.FC = () => {
       setDurations(snapshot.durations);
       setMaxHours(snapshot.maxHours);
       setTaskTemplates(snapshot.taskTemplates || []);
+      if (snapshot.schoolYears) setSchoolYears(snapshot.schoolYears);
       if (snapshot.provisionalPeriods) setProvisionalPeriods(snapshot.provisionalPeriods);
       if (snapshot.linkedSubjectGroups) setLinkedSubjectGroups(snapshot.linkedSubjectGroups);
-      setSchoolStartDate(new Date(snapshot.schoolStartDate));
-      if (snapshot.schoolEndDate) setSchoolEndDate(new Date(snapshot.schoolEndDate));
-      setSemesterSplitDate(new Date(snapshot.semesterSplitDate));
+      setSchoolStartDate(nextStartDate);
+      if (nextEndDate) setSchoolEndDate(nextEndDate);
+      setSemesterSplitDate(nextSplitDate);
       setIsSixDayWeek(snapshot.isSixDayWeek);
-      setTimeout(() => { isNavigatingHistoryRef.current = false; }, 500);
+
+      // Persiste immediatamente nel database locale anche le operazioni di Annulla / Ripristina
+      persistLocalChangesRef.current({
+        schedule: snapshot.schedule,
+        lessonNotes: snapshot.lessonNotes,
+        specialDays: snapshot.specialDays,
+        schoolClosures: snapshot.schoolClosures || [],
+        timeSlots: snapshot.timeSlots,
+        recesses: snapshot.recesses,
+        subjects: snapshot.subjects,
+        classes: snapshot.classes,
+        durations: snapshot.durations,
+        maxHours: snapshot.maxHours,
+        taskTemplates: snapshot.taskTemplates || [],
+        ...(snapshot.schoolYears ? { schoolYears: snapshot.schoolYears } : {}),
+        ...(snapshot.provisionalPeriods ? { provisionalPeriods: snapshot.provisionalPeriods } : {}),
+        ...(snapshot.linkedSubjectGroups ? { linkedSubjectGroups: snapshot.linkedSubjectGroups } : {}),
+        schoolStartDate: nextStartDate.toISOString(),
+        ...(nextEndDate ? { schoolEndDate: nextEndDate.toISOString() } : {}),
+        semesterSplitDate: nextSplitDate.toISOString(),
+        isSixDayWeek: snapshot.isSixDayWeek
+      });
+
+      setTimeout(() => { isNavigatingHistoryRef.current = false; }, 120);
   }, []);
 
   const handleUndo = () => {
@@ -536,10 +557,45 @@ const App: React.FC = () => {
     });
   };
 
+  const computeStateSnapshotFromLocalState = (s: LocalAppState): string => {
+    return computeStateSnapshot(
+      s.schedule,
+      s.lessonNotes,
+      s.specialDays,
+      s.schoolClosures,
+      s.timeSlots,
+      s.durations,
+      s.recesses,
+      s.subjects,
+      s.classes,
+      s.taskTemplates,
+      s.provisionalPeriods,
+      s.linkedSubjectGroups,
+      s.schoolStartDate,
+      s.schoolEndDate,
+      s.semesterSplitDate,
+      s.isSixDayWeek,
+      s.maxHours,
+      s.schoolYears
+    );
+  };
+
+  const [isInitialDbHydrated, setIsInitialDbHydrated] = useState(false);
+  const [persistenceStatus, setPersistenceStatus] = useState<PersistenceStatusInfo>({
+    phase: 'loading',
+    revision: 0,
+    lastSavedAt: null,
+    storageEngine: 'indexeddb',
+    pendingWrites: 0
+  });
+
   const isHydratingFromDbRef = useRef(false);
   const isLocalDbReadyRef = useRef(false);
   const lastSavedStateSnapshotRef = useRef<string>('');
   const lastStorageErrorToastRef = useRef<number>(0);
+  const pendingWritesCountRef = useRef<number>(0);
+  const latestAppStateRef = useRef<LocalAppState | null>(null);
+  const persistLocalChangesRef = useRef<(partialData: Partial<LocalAppState>) => void>(() => {});
 
   const showToastRef = useRef(showToast);
   useEffect(() => {
@@ -580,9 +636,85 @@ const App: React.FC = () => {
     buildCurrentLocalAppStateRef.current = buildCurrentLocalAppState;
   }, [buildCurrentLocalAppState]);
 
-  const applyLocalAppStateToReact = useCallback((loaded: LocalAppState) => {
+  const reportStorageError = useCallback((message?: string) => {
+    const now = Date.now();
+    if (now - lastStorageErrorToastRef.current < 5000) return;
+    lastStorageErrorToastRef.current = now;
+    showToastRef.current(
+      message || 'Errore nel salvataggio locale dei dati. Effettua un backup su disco.',
+      'error'
+    );
+  }, []);
+
+  const commitLocalStateSave = useCallback((stateToSave: LocalAppState) => {
+    latestAppStateRef.current = stateToSave;
+    lastSavedStateSnapshotRef.current = computeStateSnapshotFromLocalState(stateToSave);
+
+    pendingWritesCountRef.current += 1;
+    setPersistenceStatus((prev) => ({
+      ...prev,
+      phase: 'saving',
+      pendingWrites: pendingWritesCountRef.current,
+      errorMessage: undefined
+    }));
+
+    saveAppStateToLocalDb(stateToSave)
+      .then((res) => {
+        pendingWritesCountRef.current = Math.max(0, pendingWritesCountRef.current - 1);
+        if (res.superseded) {
+          setPersistenceStatus((prev) => ({
+            ...prev,
+            phase: pendingWritesCountRef.current > 0 ? 'saving' : prev.phase,
+            pendingWrites: pendingWritesCountRef.current
+          }));
+          return;
+        }
+        if (!res.ok || !res.verified) {
+          setPersistenceStatus((prev) => ({
+            ...prev,
+            phase: 'error',
+            revision: res.revision || prev.revision,
+            storageEngine: res.storageEngine,
+            pendingWrites: pendingWritesCountRef.current,
+            errorMessage: res.errorMessage || 'Salvataggio nel database locale non confermato.'
+          }));
+          reportStorageError(res.errorMessage);
+          return;
+        }
+
+        setPersistenceStatus((prev) => ({
+          ...prev,
+          phase: pendingWritesCountRef.current === 0 ? 'saved' : 'saving',
+          revision: Math.max(prev.revision, res.revision || 0),
+          lastSavedAt: res.updatedAt || new Date().toISOString(),
+          storageEngine: res.storageEngine,
+          pendingWrites: pendingWritesCountRef.current,
+          errorMessage: undefined
+        }));
+      })
+      .catch((err: any) => {
+        pendingWritesCountRef.current = Math.max(0, pendingWritesCountRef.current - 1);
+        const msg = err?.message || 'Errore imprevisto durante il salvataggio locale.';
+        setPersistenceStatus((prev) => ({
+          ...prev,
+          phase: 'error',
+          pendingWrites: pendingWritesCountRef.current,
+          errorMessage: msg
+        }));
+        reportStorageError(msg);
+      });
+  }, [reportStorageError]);
+
+  const handleRetryPersistenceSave = useCallback(() => {
+    if (!isLocalDbReadyRef.current) return;
+    const snapshot = latestAppStateRef.current || buildCurrentLocalAppStateRef.current();
+    commitLocalStateSave(snapshot);
+  }, [commitLocalStateSave]);
+
+  const applyLocalAppStateToReact = useCallback((loaded: LocalAppState, options?: { resetHistory?: boolean }) => {
     isHydratingFromDbRef.current = true;
     isNavigatingHistoryRef.current = true;
+    latestAppStateRef.current = loaded;
 
     if (loaded.classes !== undefined) setClasses(loaded.classes);
     if (loaded.schedule !== undefined) setSchedule(loaded.schedule);
@@ -615,47 +747,46 @@ const App: React.FC = () => {
       safeSetLocalStorage('magiclass_time_settings_updated_at', loaded.timeSettingsUpdatedAt);
     }
 
-    lastSavedStateSnapshotRef.current = computeStateSnapshot(
-      loaded.schedule,
-      loaded.lessonNotes,
-      loaded.specialDays,
-      loaded.schoolClosures,
-      loaded.timeSlots,
-      loaded.durations,
-      loaded.recesses,
-      loaded.subjects,
-      loaded.classes,
-      loaded.taskTemplates,
-      loaded.provisionalPeriods,
-      loaded.linkedSubjectGroups,
-      loaded.schoolStartDate,
-      loaded.schoolEndDate,
-      loaded.semesterSplitDate,
-      loaded.isSixDayWeek,
-      loaded.maxHours,
-      loaded.schoolYears
-    );
+    lastSavedStateSnapshotRef.current = computeStateSnapshotFromLocalState(loaded);
 
+    if (options?.resetHistory) {
+      const baselineHistorySnapshot: AppStateSnapshot = JSON.parse(JSON.stringify({
+        schedule: loaded.schedule || [],
+        lessonNotes: loaded.lessonNotes || [],
+        specialDays: loaded.specialDays || [],
+        schoolClosures: loaded.schoolClosures || [],
+        timeSlots: loaded.timeSlots || DEFAULT_TIME_SLOTS,
+        recesses: loaded.recesses || [],
+        subjects: loaded.subjects || [],
+        classes: loaded.classes || [],
+        durations: loaded.durations || DEFAULT_DURATIONS,
+        maxHours: loaded.maxHours || 7,
+        schoolStartDate: loaded.schoolStartDate,
+        schoolEndDate: loaded.schoolEndDate,
+        semesterSplitDate: loaded.semesterSplitDate,
+        isSixDayWeek: Boolean(loaded.isSixDayWeek),
+        schoolYears: loaded.schoolYears || [],
+        taskTemplates: loaded.taskTemplates || [],
+        provisionalPeriods: loaded.provisionalPeriods || [],
+        linkedSubjectGroups: loaded.linkedSubjectGroups || []
+      }));
+      lastSnapshotStrRef.current = JSON.stringify(baselineHistorySnapshot);
+      setHistory([baselineHistorySnapshot]);
+      setHistoryIndex(0);
+      historyIndexRef.current = 0;
+    }
+
+    // Rilascio immediato dopo il commit React senza finestre cieche da 300ms
     setTimeout(() => {
       isNavigatingHistoryRef.current = false;
       isHydratingFromDbRef.current = false;
-    }, 300);
-  }, []);
-
-  const reportStorageError = useCallback((message?: string) => {
-    const now = Date.now();
-    if (now - lastStorageErrorToastRef.current < 5000) return;
-    lastStorageErrorToastRef.current = now;
-    showToastRef.current(
-      message || 'Errore nel salvataggio locale dei dati. Effettua un backup su disco.',
-      'error'
-    );
+    }, 0);
   }, []);
 
   const applyRestoredUiSessionRef = useRef<(rawSession: UiSessionState, loadedData: LocalAppState) => void>(() => {});
   const isSessionRestoredRef = useRef(false);
 
-  // Inizializzazione database locale IndexedDB + migrazione verificata automatica da localStorage
+  // Inizializzazione database locale IndexedDB + recupero automatico + ripristino sessione UI
   useEffect(() => {
     let cancelled = false;
     const initialSnapshotState = buildCurrentLocalAppStateRef.current();
@@ -663,17 +794,35 @@ const App: React.FC = () => {
     initAndLoadLocalDatabase(initialSnapshotState)
       .then(async (result) => {
         if (cancelled) return;
-        isLocalDbReadyRef.current = true;
-        let resolvedData: LocalAppState = initialSnapshotState;
-        if (result.record && result.record.data && !result.migratedFromLocalStorage) {
-          resolvedData = result.record.data;
-          applyLocalAppStateToReact(result.record.data);
-        } else if (result.record && result.record.data) {
-          resolvedData = result.record.data;
+        const resolvedData: LocalAppState =
+          result.record && result.record.data ? result.record.data : initialSnapshotState;
+
+        latestAppStateRef.current = resolvedData;
+        applyLocalAppStateToReact(resolvedData, { resetHistory: true });
+
+        if (result.storageEngine === 'indexeddb' && result.record) {
+          setPersistenceStatus({
+            phase: 'saved',
+            revision: result.record.revision || 1,
+            lastSavedAt: result.record.updatedAt || new Date().toISOString(),
+            storageEngine: 'indexeddb',
+            pendingWrites: 0
+          });
+        } else {
+          setPersistenceStatus({
+            phase: 'error',
+            revision: result.record?.revision || 0,
+            lastSavedAt: result.record?.updatedAt || null,
+            storageEngine: result.storageEngine,
+            pendingWrites: 0,
+            errorMessage: result.warningMessage || 'Database locale IndexedDB non disponibile.'
+          });
         }
+
         if (result.warningMessage) {
           showToastRef.current(result.warningMessage, 'warning');
         }
+
         // Ripristino automatico dell'ultima sessione UI dopo il caricamento dei dati didattici
         try {
           const lastSession = await loadLastUiSession();
@@ -684,14 +833,25 @@ const App: React.FC = () => {
           console.warn('Avviso ripristino sessione UI:', sessionErr);
         } finally {
           if (!cancelled) {
+            isLocalDbReadyRef.current = true;
             isSessionRestoredRef.current = true;
+            setIsInitialDbHydrated(true);
           }
         }
       })
       .catch(async (err) => {
         if (cancelled) return;
-        isLocalDbReadyRef.current = true;
         console.warn('Avviso avvio database locale:', err);
+        latestAppStateRef.current = initialSnapshotState;
+        lastSavedStateSnapshotRef.current = computeStateSnapshotFromLocalState(initialSnapshotState);
+        setPersistenceStatus({
+          phase: 'error',
+          revision: 0,
+          lastSavedAt: null,
+          storageEngine: 'localstorage_fallback',
+          pendingWrites: 0,
+          errorMessage: err?.message || 'Errore di apertura del database locale IndexedDB.'
+        });
         try {
           const lastSession = await loadLastUiSession();
           if (!cancelled && lastSession) {
@@ -701,7 +861,9 @@ const App: React.FC = () => {
           // fallback silenzioso ai valori predefiniti
         } finally {
           if (!cancelled) {
+            isLocalDbReadyRef.current = true;
             isSessionRestoredRef.current = true;
+            setIsInitialDbHydrated(true);
           }
         }
       });
@@ -711,15 +873,26 @@ const App: React.FC = () => {
     };
   }, [applyLocalAppStateToReact]);
 
-  // Persistenza automatica atomica su IndexedDB + copia speculare localStorage
+  // Persistenza automatica atomica su IndexedDB + copia speculare sincronizzata localStorage
+  // Attiva SOLO dopo il completamento dell'idratazione iniziale dal database locale
   useEffect(() => {
+    if (!isLocalDbReadyRef.current || !isInitialDbHydrated) {
+      return;
+    }
+
     const stateSnapshot = computeStateSnapshot(
       schedule, lessonNotes, specialDays, schoolClosures, timeSlots, durations, recesses,
       subjects, classes, taskTemplates, provisionalPeriods, linkedSubjectGroups,
       schoolStartDate, schoolEndDate, semesterSplitDate, isSixDayWeek, maxHours, schoolYears
     );
 
-    if (isNavigatingHistoryRef.current || isHydratingFromDbRef.current) {
+    if (isHydratingFromDbRef.current) {
+      lastSavedStateSnapshotRef.current = stateSnapshot;
+      isHydratingFromDbRef.current = false;
+      return;
+    }
+
+    if (isNavigatingHistoryRef.current) {
       lastSavedStateSnapshotRef.current = stateSnapshot;
       return;
     }
@@ -730,22 +903,35 @@ const App: React.FC = () => {
     }
 
     if (stateSnapshot !== lastSavedStateSnapshotRef.current) {
-      lastSavedStateSnapshotRef.current = stateSnapshot;
       const fullState = buildCurrentLocalAppState();
-      saveAppStateToLocalDb(fullState).then((res) => {
-        if (!res.ok) {
-          reportStorageError(res.errorMessage);
-        }
-      });
+      commitLocalStateSave(fullState);
     }
   }, [
+    isInitialDbHydrated,
     schedule, lessonNotes, specialDays, schoolClosures, timeSlots, durations, recesses,
     subjects, classes, taskTemplates, provisionalPeriods, linkedSubjectGroups,
     schoolStartDate, schoolEndDate, semesterSplitDate, isSixDayWeek, maxHours, schoolYears,
-    buildCurrentLocalAppState, reportStorageError
+    buildCurrentLocalAppState, commitLocalStateSave
   ]);
 
+  const persistLocalChanges = useCallback((partialData: Partial<LocalAppState>) => {
+    if (!isLocalDbReadyRef.current) {
+      return;
+    }
+    const baseState = latestAppStateRef.current || buildCurrentLocalAppStateRef.current();
+    const mergedState: LocalAppState = {
+      ...baseState,
+      ...partialData
+    };
+    commitLocalStateSave(mergedState);
+  }, [commitLocalStateSave]);
+
   useEffect(() => {
+    persistLocalChangesRef.current = persistLocalChanges;
+  }, [persistLocalChanges]);
+
+  useEffect(() => {
+    if (!isLocalDbReadyRef.current || !isInitialDbHydrated) return;
     if (schoolYears.length === 0 && schoolStartDate) {
       const yearLabel = `${schoolStartDate.getFullYear()}/${schoolStartDate.getFullYear() + 1}`;
       const initialYear: SchoolYear = {
@@ -758,10 +944,12 @@ const App: React.FC = () => {
         closures: schoolClosures
       };
       setSchoolYears([initialYear]);
+      persistLocalChanges({ schoolYears: [initialYear] });
     }
-  }, [schoolStartDate, schoolEndDate, semesterSplitDate, isSixDayWeek, schoolClosures]);
+  }, [isInitialDbHydrated, schoolYears.length, schoolStartDate, schoolEndDate, semesterSplitDate, isSixDayWeek, schoolClosures, persistLocalChanges]);
 
   useEffect(() => {
+    if (!isLocalDbReadyRef.current || !isInitialDbHydrated) return;
     const dateStr = getLocalDateStr(currentDate);
     const year = schoolYears.find(y => dateStr >= y.startDate && dateStr <= y.endDate);
     if (year) {
@@ -775,18 +963,10 @@ const App: React.FC = () => {
       if (isSixDayWeek !== year.isSixDayWeek) setIsSixDayWeek(year.isSixDayWeek);
       if (JSON.stringify(schoolClosures) !== JSON.stringify(year.closures)) setSchoolClosures(year.closures);
     }
-  }, [currentDate, schoolYears]);
-
-  const persistLocalChanges = useCallback((partialData: Partial<LocalAppState>) => {
-    const mergedState = buildCurrentLocalAppStateRef.current(partialData);
-    saveAppStateToLocalDb(mergedState).then((res) => {
-      if (!res.ok) {
-        reportStorageError(res.errorMessage);
-      }
-    });
-  }, [reportStorageError]);
+  }, [isInitialDbHydrated, currentDate, schoolYears]);
 
   useEffect(() => {
+    if (!isLocalDbReadyRef.current || !isInitialDbHydrated) return;
     if (provisionalPeriods && provisionalPeriods.length > 0) {
       const ensured = syncProvisionalPeriodsWithSchedule(schedule, provisionalPeriods, schoolYears);
       const reallocatedNotes = reallocateLessonNotesForPeriods(
@@ -816,7 +996,7 @@ const App: React.FC = () => {
         persistLocalChanges(dataToPersist);
       }
     }
-  }, [provisionalPeriods, schoolYears]);
+  }, [isInitialDbHydrated, provisionalPeriods, schoolYears]);
 
   const [isRecessModalOpen, setIsRecessModalOpen] = useState(false);
   const [selectedLesson, setSelectedLesson] = useState<{ lesson: Lesson, dateStr: string } | null>(null);
@@ -1026,23 +1206,27 @@ const App: React.FC = () => {
 
   // Flush sincrono su chiusura scheda, refresh, cambio visibilità o chiusura browser
   useEffect(() => {
-    const flushSession = () => {
-      if (!isSessionRestoredRef.current) return;
-      sessionPersisterRef.current.flushNow(buildCurrentUiSessionStateRef.current());
+    const flushAllStateOnExit = () => {
+      if (isLocalDbReadyRef.current && latestAppStateRef.current) {
+        flushAppStateMirrorSync(latestAppStateRef.current);
+      }
+      if (isSessionRestoredRef.current) {
+        sessionPersisterRef.current.flushNow(buildCurrentUiSessionStateRef.current());
+      }
     };
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'hidden') {
-        flushSession();
+        flushAllStateOnExit();
       }
     };
 
-    window.addEventListener('pagehide', flushSession);
-    window.addEventListener('beforeunload', flushSession);
+    window.addEventListener('pagehide', flushAllStateOnExit);
+    window.addEventListener('beforeunload', flushAllStateOnExit);
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
-      window.removeEventListener('pagehide', flushSession);
-      window.removeEventListener('beforeunload', flushSession);
+      window.removeEventListener('pagehide', flushAllStateOnExit);
+      window.removeEventListener('beforeunload', flushAllStateOnExit);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       sessionPersisterRef.current.cancel();
     };
@@ -2280,9 +2464,16 @@ const App: React.FC = () => {
 
     setSpecialDays(updatedSpecialDays);
     setIsStartDateModalOpen(false);
-    persistLocalChanges({ 
+    persistLocalChanges({
         schoolYears: newYears,
-        specialDays: updatedSpecialDays
+        specialDays: updatedSpecialDays,
+        ...(activeYear ? {
+          schoolStartDate: new Date(activeYear.startDate).toISOString(),
+          schoolEndDate: new Date(activeYear.endDate).toISOString(),
+          semesterSplitDate: new Date(activeYear.splitDate).toISOString(),
+          isSixDayWeek: activeYear.isSixDayWeek,
+          schoolClosures: activeYear.closures
+        } : {})
     });
   };
 
@@ -2696,11 +2887,18 @@ const App: React.FC = () => {
 
       // 2. Scrittura atomica su IndexedDB prima di confermare
       const writeResult = await saveAppStateToLocalDb(fullRestoredState);
-      if (!writeResult.ok) {
+      if (!writeResult.ok || !writeResult.verified) {
         throw new Error(writeResult.errorMessage || 'Scrittura database locale fallita durante il ripristino.');
       }
 
-      applyLocalAppStateToReact(fullRestoredState);
+      applyLocalAppStateToReact(fullRestoredState, { resetHistory: true });
+      setPersistenceStatus((prev) => ({
+        phase: 'saved',
+        revision: writeResult.revision || prev.revision,
+        lastSavedAt: writeResult.updatedAt || new Date().toISOString(),
+        storageEngine: writeResult.storageEngine,
+        pendingWrites: 0
+      }));
 
       if (navigateToRestoredYear) {
         const [y, m, d] = targetYearSummary.startDate.split('-').map(Number);
@@ -2719,8 +2917,17 @@ const App: React.FC = () => {
     } catch (err) {
       // Rollback automatico allo snapshot pre-ripristino in caso di errore
       if (safetySnapshot && safetySnapshot.data) {
-        await saveAppStateToLocalDb(safetySnapshot.data);
-        applyLocalAppStateToReact(safetySnapshot.data);
+        const rollbackRes = await saveAppStateToLocalDb(safetySnapshot.data);
+        applyLocalAppStateToReact(safetySnapshot.data, { resetHistory: true });
+        if (rollbackRes.ok && rollbackRes.verified) {
+          setPersistenceStatus((prev) => ({
+            phase: 'saved',
+            revision: rollbackRes.revision || prev.revision,
+            lastSavedAt: rollbackRes.updatedAt || new Date().toISOString(),
+            storageEngine: rollbackRes.storageEngine,
+            pendingWrites: 0
+          }));
+        }
       }
       throw err;
     }
@@ -2732,10 +2939,17 @@ const App: React.FC = () => {
       throw new Error('Snapshot di sicurezza non trovato.');
     }
     const writeResult = await saveAppStateToLocalDb(snap.data);
-    if (!writeResult.ok) {
+    if (!writeResult.ok || !writeResult.verified) {
       throw new Error(writeResult.errorMessage || 'Impossibile ripristinare lo snapshot precedente.');
     }
-    applyLocalAppStateToReact(snap.data);
+    applyLocalAppStateToReact(snap.data, { resetHistory: true });
+    setPersistenceStatus((prev) => ({
+      phase: 'saved',
+      revision: writeResult.revision || prev.revision,
+      lastSavedAt: writeResult.updatedAt || new Date().toISOString(),
+      storageEngine: writeResult.storageEngine,
+      pendingWrites: 0
+    }));
     showToast('Stato precedente al ripristino recuperato correttamente.', 'success');
     return true;
   };
@@ -2912,6 +3126,17 @@ const App: React.FC = () => {
       const targetDate = new Date(dateStr); targetDate.setHours(12, 0, 0, 0); setCurrentDate(targetDate); setHighlightedLessonId(lessonId); setIsSearchModalOpen(false); setTimeout(() => setHighlightedLessonId(null), 5000);
   };
 
+  if (!isInitialDbHydrated) {
+    return (
+      <div className="h-[100dvh] w-screen bg-slate-50 flex flex-col items-center justify-center gap-3 text-slate-700 select-none">
+        <div className="w-10 h-10 rounded-full border-4 border-slate-200 border-t-indigo-600 animate-spin" />
+        <p className="text-sm font-semibold tracking-tight text-slate-600">
+          Caricamento dati locali di MagiClass...
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="h-[100dvh] w-screen bg-slate-50 flex flex-col text-slate-900">
       <ScheduleView 
@@ -2928,6 +3153,8 @@ const App: React.FC = () => {
         onToggleVotoStatus={handleToggleVotoStatus}
         onQuickBackup={() => { void handleQuickBackup(false); }}
         isQuickBackupSaving={isQuickBackupSaving}
+        persistenceStatus={persistenceStatus}
+        onRetryPersistenceSave={handleRetryPersistenceSave}
         initialMobileWeekView={restoredMobileWeekView}
         initialActiveMobileTab={restoredActiveMobileTab}
         sessionRestoreKey={sessionRestoreRevision}

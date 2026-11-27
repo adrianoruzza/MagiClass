@@ -94,6 +94,62 @@ const TaskDatabaseModal: React.FC<TaskDatabaseModalProps> = ({
     return () => cancelAnimationFrame(frame);
   }, [isOpen, expandedTemplateId, sessionRestoreKey]);
 
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastCommittedSigRef = useRef<string>(JSON.stringify(templates || []));
+
+  useEffect(() => {
+    if (!hasLocalEditsRef.current) {
+      lastCommittedSigRef.current = JSON.stringify(templates || []);
+    }
+  }, [templates]);
+
+  const commitTemplatesIfDirtyRef = useRef<() => void>(() => {});
+  commitTemplatesIfDirtyRef.current = () => {
+    if (!isOpen || !hasLocalEditsRef.current) return;
+    const sig = JSON.stringify(localTemplates);
+    if (sig === lastCommittedSigRef.current) return;
+    lastCommittedSigRef.current = sig;
+    onSave(localTemplates);
+  };
+
+  useEffect(() => {
+    if (!isOpen || !hasLocalEditsRef.current) return;
+    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    autoSaveTimerRef.current = setTimeout(() => {
+      autoSaveTimerRef.current = null;
+      commitTemplatesIfDirtyRef.current();
+    }, 400);
+    return () => {
+      if (autoSaveTimerRef.current) {
+        clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = null;
+      }
+    };
+  }, [isOpen, localTemplates]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const flushNow = () => {
+      if (autoSaveTimerRef.current) {
+        clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = null;
+      }
+      commitTemplatesIfDirtyRef.current();
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === 'hidden') flushNow();
+    };
+    window.addEventListener('pagehide', flushNow);
+    window.addEventListener('beforeunload', flushNow);
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      window.removeEventListener('pagehide', flushNow);
+      window.removeEventListener('beforeunload', flushNow);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      flushNow();
+    };
+  }, [isOpen]);
+
   if (!isOpen) return null;
 
   const handleAddTemplate = () => {
@@ -139,7 +195,12 @@ const TaskDatabaseModal: React.FC<TaskDatabaseModalProps> = ({
   };
 
   const handleCloseAction = (isBack: boolean = false) => {
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
     if (hasLocalEditsRef.current || JSON.stringify(localTemplates) !== JSON.stringify(templates || [])) {
+      lastCommittedSigRef.current = JSON.stringify(localTemplates);
       onSave(localTemplates);
     }
     if (expandedTemplateId !== null) {

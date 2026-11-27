@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { X, Coffee, Plus, Trash2, CheckCircle2, ChevronLeft, Link2, Unlink } from 'lucide-react';
 import { Recess } from '../types';
 
@@ -33,7 +33,13 @@ const RecessModal: React.FC<RecessModalProps> = ({
   timeSlots = {},
   onSave,
 }) => {
-  const [localRecesses, setLocalRecesses] = useState<Recess[]>(() => JSON.parse(JSON.stringify(recesses)));
+  const [localRecesses, setLocalRecesses] = useState<Recess[]>(() => JSON.parse(JSON.stringify(recesses || [])));
+
+  useEffect(() => {
+    if (isOpen) {
+      setLocalRecesses(JSON.parse(JSON.stringify(recesses || [])));
+    }
+  }, [isOpen, recesses]);
 
   if (!isOpen) return null;
 
@@ -57,9 +63,13 @@ const RecessModal: React.FC<RecessModalProps> = ({
     ));
   };
 
-  const handleCloseAndSave = () => {
+  const handleCloseAndSave = (goBack: boolean = false) => {
     onSave(localRecesses);
-    onClose();
+    if (goBack && onBack) {
+      onBack();
+    } else {
+      onClose();
+    }
   };
 
   const getRecessTimeRange = (recess: Recess) => {
@@ -82,7 +92,7 @@ const RecessModal: React.FC<RecessModalProps> = ({
         {/* Header */}
         <div className="bg-slate-800 text-white p-4 sm:p-5 flex items-center gap-2 shrink-0">
           {onBack && (
-            <button onClick={onBack} className="p-2 -ml-2 hover:bg-slate-700 rounded-full transition-colors mr-1">
+            <button onClick={() => handleCloseAndSave(true)} className="p-2 -ml-2 hover:bg-slate-700 rounded-full transition-colors mr-1">
               <ChevronLeft className="w-5 h-5 sm:w-6 sm:h-6" />
             </button>
           )}
@@ -90,7 +100,7 @@ const RecessModal: React.FC<RecessModalProps> = ({
             <Coffee className="w-5 h-5 sm:w-6 sm:h-6 text-amber-400" />
             Gestione Ricreazione
           </h2>
-          <button onClick={handleCloseAndSave} className="p-2 hover:bg-slate-700 rounded-full transition-colors">
+          <button onClick={() => handleCloseAndSave(false)} className="p-2 hover:bg-slate-700 rounded-full transition-colors">
             <X className="w-5 h-5" />
           </button>
         </div>

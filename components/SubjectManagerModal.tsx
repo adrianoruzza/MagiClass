@@ -30,19 +30,31 @@ const SubjectManagerModal: React.FC<SubjectManagerModalProps> = ({
   linkedSubjectGroups = [],
   onSaveLinkedSubjectGroups,
 }) => {
-  const [localSubjects, setLocalSubjects] = useState<Subject[]>(JSON.parse(JSON.stringify(subjects)));
+  const [localSubjects, setLocalSubjects] = useState<Subject[]>(() => JSON.parse(JSON.stringify(subjects)));
   const [newName, setNewName] = useState('');
   const [newColor, setNewColor] = useState(SUBJECT_COLOR_PRESETS[0].value);
 
-  const [localClasses, setLocalClasses] = useState<ClassEntity[]>(JSON.parse(JSON.stringify(classes)));
+  const [localClasses, setLocalClasses] = useState<ClassEntity[]>(() => JSON.parse(JSON.stringify(classes)));
   const [newClassName, setNewClassName] = useState('');
   const [newClassColor, setNewClassColor] = useState(SUBJECT_COLOR_PRESETS[0].value);
 
   // --- LINKED SUBJECTS STATE & MODAL ---
-  const [localLinkedGroups, setLocalLinkedGroups] = useState<LinkedSubjectGroup[]>(
+  const [localLinkedGroups, setLocalLinkedGroups] = useState<LinkedSubjectGroup[]>(() =>
     JSON.parse(JSON.stringify(linkedSubjectGroups || []))
   );
   const [isLinkModalOpen, setIsLinkModalOpen] = useState(false);
+
+  // Risincronizza sempre i dati reali dal database locale ogni volta che la finestra si apre
+  // (impedisce che lo stato pre-idratazione al mount sovrascriva classi, studenti o materie)
+  useEffect(() => {
+    if (isOpen) {
+      setLocalSubjects(JSON.parse(JSON.stringify(subjects || [])));
+      setLocalClasses(JSON.parse(JSON.stringify(classes || [])));
+      setLocalLinkedGroups(JSON.parse(JSON.stringify(linkedSubjectGroups || [])));
+      setEditingSubjectId(null);
+      setEditingClassId(null);
+    }
+  }, [isOpen]);
 
   useEffect(() => {
     if (linkedSubjectGroups) {
@@ -71,13 +83,17 @@ const SubjectManagerModal: React.FC<SubjectManagerModalProps> = ({
     if (!newName.trim()) return;
     const newId = crypto.randomUUID();
     const newSubject: Subject = { id: newId, name: newName.trim(), colorStyles: newColor };
-    setLocalSubjects([...localSubjects, newSubject]);
+    const updated = [...localSubjects, newSubject];
+    setLocalSubjects(updated);
+    onSave(updated);
     setNewName('');
   };
 
   const handleRemoveSubject = (id: string) => {
     if (confirm('Sei sicuro di voler eliminare questa materia? Le lezioni esistenti manterranno il nome ma perderanno il colore personalizzato.')) {
-        setLocalSubjects(localSubjects.filter(s => s.id !== id));
+        const updatedSubjects = localSubjects.filter(s => s.id !== id);
+        setLocalSubjects(updatedSubjects);
+        onSave(updatedSubjects);
         // Clean up subject from linked groups as well
         const updatedGroups = localLinkedGroups
           .map(g => ({
@@ -107,11 +123,13 @@ const SubjectManagerModal: React.FC<SubjectManagerModalProps> = ({
 
   const saveEditingSubject = () => {
       if (!editingSubjectId || !editSubjectName.trim()) return;
-      setLocalSubjects(prev => prev.map(s => 
+      const updated = localSubjects.map(s => 
           s.id === editingSubjectId 
           ? { ...s, name: editSubjectName.trim(), colorStyles: editSubjectColor }
           : s
-      ));
+      );
+      setLocalSubjects(updated);
+      onSave(updated);
       setEditingSubjectId(null);
   };
 
@@ -124,13 +142,17 @@ const SubjectManagerModal: React.FC<SubjectManagerModalProps> = ({
     if (!newClassName.trim()) return;
     const newId = crypto.randomUUID();
     const newClass: ClassEntity = { id: newId, name: newClassName.trim(), colorStyles: newClassColor, subjectIds: [] };
-    setLocalClasses([...localClasses, newClass]);
+    const updated = [...localClasses, newClass];
+    setLocalClasses(updated);
+    onSaveClasses(updated);
     setNewClassName('');
   };
 
   const handleRemoveClass = (id: string) => {
     if (confirm('Sei sicuro di voler eliminare questa classe? Le lezioni esistenti non verranno eliminate, ma perderanno il colore associato.')) {
-        setLocalClasses(localClasses.filter(c => c.id !== id));
+        const updated = localClasses.filter(c => c.id !== id);
+        setLocalClasses(updated);
+        onSaveClasses(updated);
     }
   };
 
@@ -153,11 +175,13 @@ const SubjectManagerModal: React.FC<SubjectManagerModalProps> = ({
 
   const saveEditingClass = () => {
       if (!editingClassId || !editClassName.trim()) return;
-      setLocalClasses(prev => prev.map(c => 
+      const updated = localClasses.map(c => 
           c.id === editingClassId 
           ? { ...c, name: editClassName.trim(), colorStyles: editClassColor, subjectIds: editClassSubjectIds }
           : c
-      ));
+      );
+      setLocalClasses(updated);
+      onSaveClasses(updated);
       setEditingClassId(null);
   };
 
@@ -171,9 +195,11 @@ const SubjectManagerModal: React.FC<SubjectManagerModalProps> = ({
   };
 
   const handleSaveStudentsForClass = (classId: string, students: any[]) => {
-      setLocalClasses(prev => prev.map(c => 
+      const updated = localClasses.map(c => 
           c.id === classId ? { ...c, students } : c
-      ));
+      );
+      setLocalClasses(updated);
+      onSaveClasses(updated);
   };
 
   const handleCloseAction = (isBack: boolean = false) => {

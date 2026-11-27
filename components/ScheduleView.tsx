@@ -6,7 +6,8 @@ import { isDateInProvisionalPeriod, getEffectiveTimeSlotsForDate, getEffectiveTi
 import { isDisposizioneLesson } from '../utils/repetitionUtils';
 import { formatLastBackupTimestamp } from '../utils/deviceBackup';
 import { findNoteForLessonUnified } from '../utils/noteLookup';
-import { Plus, Check, ChevronLeft, ChevronRight, Calendar, Copy, Circle, X, Undo2, Redo2, Coffee, LayoutGrid, RectangleHorizontal, UserMinus, Users, Stethoscope, School, ChevronDown, Ban, GripHorizontal, ArrowRight, Clock, Settings, Search, MapPin, Filter, Repeat, Save } from 'lucide-react';
+import { PersistenceStatusInfo } from '../utils/localDatabase';
+import { Plus, Check, ChevronLeft, ChevronRight, Calendar, Copy, Circle, X, Undo2, Redo2, Coffee, LayoutGrid, RectangleHorizontal, UserMinus, Users, Stethoscope, School, ChevronDown, Ban, GripHorizontal, ArrowRight, Clock, Settings, Search, MapPin, Filter, Repeat, Save, Loader2, AlertTriangle, CheckCircle2 } from 'lucide-react';
 import AppIcon from './AppIcon';
 
 interface ScheduleViewProps {
@@ -55,6 +56,8 @@ interface ScheduleViewProps {
   onToggleVotoStatus: (lessonId: string, dateStr: string) => void;
   onQuickBackup?: () => void;
   isQuickBackupSaving?: boolean;
+  persistenceStatus?: PersistenceStatusInfo;
+  onRetryPersistenceSave?: () => void;
   initialMobileWeekView?: boolean;
   initialActiveMobileTab?: number;
   sessionRestoreKey?: number;
@@ -282,6 +285,8 @@ const ScheduleView: React.FC<ScheduleViewProps> = ({
   onToggleVotoStatus,
   onQuickBackup,
   isQuickBackupSaving = false,
+  persistenceStatus,
+  onRetryPersistenceSave,
   initialMobileWeekView,
   initialActiveMobileTab,
   sessionRestoreKey = 0,
@@ -290,6 +295,76 @@ const ScheduleView: React.FC<ScheduleViewProps> = ({
   onUiViewChange,
   onScrollPositionChange
 }) => {
+  const formatSavedClockTime = (iso: string | null | undefined): string => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  };
+
+  const renderPersistenceIndicator = (variant: 'mobile' | 'tablet' | 'desktop') => {
+    if (!persistenceStatus || persistenceStatus.phase === 'loading') return null;
+
+    const btnSize =
+      variant === 'mobile'
+        ? 'w-7 h-7 sm:w-8 sm:h-8'
+        : variant === 'tablet'
+          ? 'w-8 h-8'
+          : 'w-9 h-9';
+    const iconSize =
+      variant === 'mobile'
+        ? 'w-3.5 h-3.5 sm:w-4 sm:h-4'
+        : variant === 'tablet'
+          ? 'w-4 h-4'
+          : 'w-4 h-4';
+
+    if (persistenceStatus.phase === 'saving' || persistenceStatus.pendingWrites > 0) {
+      return (
+        <span
+          className={`${btnSize} flex items-center justify-center rounded-full bg-white/10 text-amber-200 shrink-0`}
+          title="Salvataggio in corso nel database locale..."
+          aria-label="Salvataggio in corso nel database locale"
+          role="status"
+        >
+          <Loader2 className={`${iconSize} animate-spin`} />
+        </span>
+      );
+    }
+
+    if (persistenceStatus.phase === 'error') {
+      return (
+        <button
+          type="button"
+          onClick={onRetryPersistenceSave}
+          className={`${btnSize} flex items-center justify-center rounded-full bg-rose-500/90 hover:bg-rose-500 text-white shadow-sm shrink-0 transition-all magi-press`}
+          title={`${persistenceStatus.errorMessage || 'Errore di salvataggio locale.'} Clicca per riprovare.`}
+          aria-label="Errore salvataggio locale. Clicca per riprovare"
+        >
+          <AlertTriangle className={iconSize} />
+        </button>
+      );
+    }
+
+    if (persistenceStatus.phase === 'saved' && persistenceStatus.pendingWrites === 0) {
+      const savedTime = formatSavedClockTime(persistenceStatus.lastSavedAt);
+      const label = savedTime
+        ? `Dati salvati nel database locale (${savedTime})`
+        : 'Dati salvati nel database locale';
+      return (
+        <span
+          className={`${btnSize} flex items-center justify-center rounded-full bg-emerald-400/15 text-emerald-200 shrink-0`}
+          title={label}
+          aria-label={label}
+          role="status"
+        >
+          <CheckCircle2 className={iconSize} />
+        </span>
+      );
+    }
+
+    return null;
+  };
+
   const hoursArray = useMemo(() => Array.from({ length: maxHours }, (_, i) => i + 1), [maxHours]);
 
   const [activeMobileTab, setActiveMobileTab] = useState<number>(() => {
@@ -1615,6 +1690,8 @@ const ScheduleView: React.FC<ScheduleViewProps> = ({
                 <Settings className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
               </button>
 
+              {renderPersistenceIndicator('mobile')}
+
               {onQuickBackup && (
                 <button
                   onClick={onQuickBackup}
@@ -1827,6 +1904,8 @@ const ScheduleView: React.FC<ScheduleViewProps> = ({
               <Redo2 className="w-4 h-4" />
             </button>
 
+            {renderPersistenceIndicator('tablet')}
+
             {onQuickBackup && (
               <button
                 onClick={onQuickBackup}
@@ -1949,6 +2028,8 @@ const ScheduleView: React.FC<ScheduleViewProps> = ({
             >
               <Redo2 className="w-6 h-6" />
             </button>
+            {renderPersistenceIndicator('desktop')}
+
             {onQuickBackup && (
               <button
                 onClick={onQuickBackup}

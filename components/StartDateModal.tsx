@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { X, Calendar, CheckCircle2, ChevronLeft, Plus, Trash2, ShieldAlert } from 'lucide-react';
 import { SchoolYear } from '../types';
 
@@ -46,6 +46,17 @@ const StartDateModal: React.FC<StartDateModalProps> = ({
   });
 
   const [newClosure, setNewClosure] = useState({ start: '', end: '', label: '' });
+
+  // Risincronizza sempre gli anni scolastici reali dal database all'apertura
+  useEffect(() => {
+    if (isOpen) {
+      const cloned: SchoolYear[] = schoolYears.length > 0 ? JSON.parse(JSON.stringify(schoolYears)) : [];
+      setLocalYears(cloned);
+      const dateStr = getLocalDateStr(currentDate);
+      const active = cloned.find(y => dateStr >= y.startDate && dateStr <= y.endDate);
+      setSelectedYearId(active ? active.id : (cloned[0]?.id || ''));
+    }
+  }, [isOpen, schoolYears, currentDate]);
 
   if (!isOpen) return null;
 
@@ -117,19 +128,23 @@ const StartDateModal: React.FC<StartDateModalProps> = ({
       updateSelectedYear({ closures: selectedYear.closures.filter(c => c.id !== id) });
   };
 
-  const handleCloseAndSave = () => {
+  const handleCloseAndSave = (goBack: boolean = false) => {
     onSave(localYears);
-    onClose();
+    if (goBack && onBack) {
+      onBack();
+    } else {
+      onClose();
+    }
   };
 
   return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-md p-2 sm:p-4 animate-magi-fade" onClick={onClose}>
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-md p-2 sm:p-4 animate-magi-fade" onClick={() => handleCloseAndSave(false)}>
       <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden animate-magi-modal flex flex-col max-h-[90vh]" onClick={(e) => e.stopPropagation()}>
         
         {/* Header */}
         <div className="bg-slate-800 text-white p-6 flex items-center gap-2 shrink-0">
           {onBack && (
-            <button onClick={onBack} className="p-2 -ml-2 hover:bg-slate-700 rounded-full transition-colors mr-1 magi-press">
+            <button onClick={() => handleCloseAndSave(true)} className="p-2 -ml-2 hover:bg-slate-700 rounded-full transition-colors mr-1 magi-press">
               <ChevronLeft className="w-6 h-6" />
             </button>
           )}
@@ -137,7 +152,7 @@ const StartDateModal: React.FC<StartDateModalProps> = ({
             <Calendar className="w-6 h-6 text-emerald-400" />
             Calendario Scolastico
           </h2>
-          <button onClick={handleCloseAndSave} className="p-2 hover:bg-slate-700 rounded-full transition-colors magi-press">
+          <button onClick={() => handleCloseAndSave(false)} className="p-2 hover:bg-slate-700 rounded-full transition-colors magi-press">
             <X className="w-6 h-6" />
           </button>
         </div>

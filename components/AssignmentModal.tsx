@@ -432,6 +432,8 @@ const AssignmentModal: React.FC<AssignmentModalProps> = ({
   const hasLocalEditsRef = useRef(false);
   const lastSessionKeyRef = useRef('');
   const lastSyncedNoteSigRef = useRef('');
+  const lastCommittedNoteSigRef = useRef('');
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleToCheckChange = (val: string) => {
     hasLocalEditsRef.current = true;
@@ -528,6 +530,7 @@ const AssignmentModal: React.FC<AssignmentModalProps> = ({
     // Sincronizza i campi all'apertura o quando la nota cambia esternamente (senza sovrascrivere modifiche locali in corso)
     if (isNewSession || (!hasLocalEditsRef.current && lastSyncedNoteSigRef.current !== noteSig)) {
       lastSyncedNoteSigRef.current = noteSig;
+      lastCommittedNoteSigRef.current = noteSig;
       setToCheck(note?.toCheck || '');
       setCheckStatus(note?.checkStatus || 'pending');
       setToDo(note?.toDo || '');
@@ -552,6 +555,99 @@ const AssignmentModal: React.FC<AssignmentModalProps> = ({
     }
   }, [isOpen, lesson.id, dateStr, note]);
 
+  const buildCurrentDraftNote = (): LessonNote => ({
+    lessonId: lesson.id,
+    date: dateStr,
+    hour: lesson.hour,
+    className: lesson.className,
+    subject: lesson.subject,
+    toCheck,
+    checkStatus,
+    toDo,
+    doStatus,
+    misc,
+    miscStatus,
+    type: lessonType,
+    reSynced,
+    votoSynced
+  });
+
+  const commitDraftIfDirtyRef = useRef<() => void>(() => {});
+  commitDraftIfDirtyRef.current = () => {
+    if (!isOpen || !hasLocalEditsRef.current) return;
+    const hasMeaningfulContent = Boolean(
+      toCheck.trim() ||
+      toDo.trim() ||
+      misc.trim() ||
+      lessonType !== 'lesson' ||
+      reSynced ||
+      votoSynced
+    );
+    if (!note && !hasMeaningfulContent) return;
+
+    const sig = JSON.stringify({
+      toCheck,
+      checkStatus,
+      toDo,
+      doStatus,
+      misc,
+      miscStatus,
+      type: lessonType,
+      reSynced,
+      votoSynced
+    });
+    if (sig === lastCommittedNoteSigRef.current) return;
+
+    lastCommittedNoteSigRef.current = sig;
+    lastSyncedNoteSigRef.current = sig;
+    onSaveNote(buildCurrentDraftNote());
+  };
+
+  // Salvataggio automatico continuo durante la modifica (debounce 350ms)
+  useEffect(() => {
+    if (!isOpen || !hasLocalEditsRef.current) return;
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+    }
+    autoSaveTimerRef.current = setTimeout(() => {
+      autoSaveTimerRef.current = null;
+      commitDraftIfDirtyRef.current();
+    }, 350);
+
+    return () => {
+      if (autoSaveTimerRef.current) {
+        clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = null;
+      }
+    };
+  }, [isOpen, toCheck, checkStatus, toDo, doStatus, misc, miscStatus, lessonType, reSynced, votoSynced]);
+
+  // Flush immediato su chiusura scheda, refresh o passaggio in background
+  useEffect(() => {
+    if (!isOpen) return;
+    const flushNow = () => {
+      if (autoSaveTimerRef.current) {
+        clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = null;
+      }
+      commitDraftIfDirtyRef.current();
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === 'hidden') flushNow();
+    };
+
+    window.addEventListener('pagehide', flushNow);
+    window.addEventListener('beforeunload', flushNow);
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      window.removeEventListener('pagehide', flushNow);
+      window.removeEventListener('beforeunload', flushNow);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      flushNow();
+    };
+  }, [isOpen]);
+
   if (!isOpen) return null;
 
   const displayDate = (() => {
@@ -567,35 +663,11 @@ const AssignmentModal: React.FC<AssignmentModalProps> = ({
   })();
 
   const handleClose = () => {
-    const hasMeaningfulContent = Boolean(
-      toCheck.trim() ||
-      toDo.trim() ||
-      misc.trim() ||
-      lessonType !== 'lesson' ||
-      reSynced ||
-      votoSynced
-    );
-    // Salva solo se l'utente ha effettivamente modificato qualcosa nella finestra corrente:
-    // impedisce che la semplice apertura/chiusura possa sovrascrivere compiti esistenti.
-    if (hasLocalEditsRef.current && (note || hasMeaningfulContent)) {
-      const updatedNote: LessonNote = {
-        lessonId: lesson.id,
-        date: dateStr,
-        hour: lesson.hour,
-        className: lesson.className,
-        subject: lesson.subject,
-        toCheck,
-        checkStatus,
-        toDo,
-        doStatus,
-        misc,
-        miscStatus,
-        type: lessonType,
-        reSynced,
-        votoSynced
-      };
-      onSaveNote(updatedNote);
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
     }
+    commitDraftIfDirtyRef.current();
     onClose();
   };
 
@@ -738,7 +810,7 @@ const AssignmentModal: React.FC<AssignmentModalProps> = ({
                  <div>
                     <div className="flex items-center gap-2">
                         <h2 className="text-xl font-bold leading-none">{lesson.className}</h2>
-                        <button onClick={() => onEdit(lesson)} className="p-1.5 hover:bg-white/10 rounded-full transition-colors text-white/70 hover:text-white magi-press"><Pencil className="w-4 h-4" /></button>
+                        <button onClick={() => { commitDraftIfDirtyRef.current(); onEdit(lesson); }} className="p-1.5 hover:bg-white/10 rounded-full transition-colors text-white/70 hover:text-white magi-press"><Pencil className="w-4 h-4" /></button>
 
                         {/* Repetition Button EXCLUSIVELY for ore a disposizione */}
                         {isDisposizione && (

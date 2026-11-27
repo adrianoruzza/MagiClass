@@ -23,6 +23,8 @@ const PRIMARY_STATE_KEY = 'current_state';
 const UI_SESSION_KEY = 'last_ui_session';
 const MAX_SNAPSHOTS = 5;
 
+export const LOCAL_MIRROR_META_KEY = 'magiclass_local_mirror_meta_v1';
+
 const LEGACY_CLOUD_DB_NAME = 'magiclass_secure_vault';
 
 const LEGACY_CLOUD_LS_PREFIXES = [
@@ -58,7 +60,17 @@ export interface StoredStateRecord {
   schemaVersion: number;
   revision: number;
   updatedAt: string;
+  updatedAtMs?: number;
+  contentHash?: string;
   data: LocalAppState;
+}
+
+export interface LocalMirrorMeta {
+  schemaVersion: number;
+  revision: number;
+  updatedAt: string;
+  updatedAtMs: number;
+  contentHash: string;
 }
 
 export interface LocalSnapshotRecord {
@@ -73,6 +85,7 @@ export interface LocalSnapshotRecord {
 export interface LocalDbInitResult {
   record: StoredStateRecord | null;
   migratedFromLocalStorage: boolean;
+  recoveredNewerMirror?: boolean;
   storageEngine: 'indexeddb' | 'localstorage_fallback';
   warningMessage?: string;
 }
@@ -81,8 +94,25 @@ export interface LocalDbWriteResult {
   ok: boolean;
   revision?: number;
   updatedAt?: string;
+  updatedAtMs?: number;
+  contentHash?: string;
+  verified?: boolean;
+  superseded?: boolean;
+  persistedInIndexedDb?: boolean;
+  persistedInLocalStorage?: boolean;
   storageEngine: 'indexeddb' | 'localstorage_fallback';
-  errorCode?: 'QUOTA_EXCEEDED' | 'IDB_UNAVAILABLE' | 'WRITE_FAILED';
+  errorCode?: 'QUOTA_EXCEEDED' | 'IDB_UNAVAILABLE' | 'WRITE_FAILED' | 'VERIFY_FAILED';
+  errorMessage?: string;
+}
+
+export type PersistencePhase = 'loading' | 'saving' | 'saved' | 'unsaved' | 'error';
+
+export interface PersistenceStatusInfo {
+  phase: PersistencePhase;
+  revision: number;
+  lastSavedAt: string | null;
+  storageEngine: 'indexeddb' | 'localstorage_fallback';
+  pendingWrites: number;
   errorMessage?: string;
 }
 
@@ -103,6 +133,49 @@ const safeParseJson = <T>(raw: string | null): T | undefined => {
   }
 };
 
+/**
+ * Hash deterministico rapido (FNV-1a 32-bit doppio) indipendente dall'ordine delle chiavi
+ * per verificare l'integrità delle scritture tra memoria, mirror localStorage e IndexedDB.
+ */
+const canonicalSerializeState = (state: LocalAppState): string => {
+  const ordered: Record<string, unknown> = {
+    classes: state.classes ?? [],
+    durations: state.durations ?? {},
+    isSixDayWeek: Boolean(state.isSixDayWeek),
+    lessonNotes: state.lessonNotes ?? [],
+    linkedSubjectGroups: state.linkedSubjectGroups ?? [],
+    maxHours: Number(state.maxHours) || 7,
+    provisionalPeriods: state.provisionalPeriods ?? [],
+    recesses: state.recesses ?? [],
+    schedule: state.schedule ?? [],
+    schoolClosures: state.schoolClosures ?? [],
+    schoolEndDate: state.schoolEndDate ?? '',
+    schoolStartDate: state.schoolStartDate ?? '',
+    schoolYears: state.schoolYears ?? [],
+    semesterSplitDate: state.semesterSplitDate ?? '',
+    specialDays: state.specialDays ?? [],
+    subjects: state.subjects ?? [],
+    taskTemplates: state.taskTemplates ?? [],
+    timeSettingsUpdatedAt: state.timeSettingsUpdatedAt ?? null,
+    timeSlots: state.timeSlots ?? {}
+  };
+  return JSON.stringify(ordered);
+};
+
+export const computeStateContentHash = (state: LocalAppState): string => {
+  const str = canonicalSerializeState(state);
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    h1 ^= c;
+    h1 = Math.imul(h1, 0x01000193);
+    h2 ^= c + (i & 0xff);
+    h2 = Math.imul(h2, 0x85ebca6b);
+  }
+  return `${(h1 >>> 0).toString(16).padStart(8, '0')}${(h2 >>> 0).toString(16).padStart(8, '0')}:${str.length}`;
+};
+
 export const safeSetLocalStorageItem = (key: string, value: string): { ok: boolean; quotaExceeded?: boolean } => {
   try {
     if (typeof localStorage === 'undefined') return { ok: false };
@@ -115,6 +188,29 @@ export const safeSetLocalStorageItem = (key: string, value: string): { ok: boole
       err?.code === 1014;
     return { ok: false, quotaExceeded };
   }
+};
+
+export const readMirrorMetaFromLocalStorage = (): LocalMirrorMeta | null => {
+  try {
+    if (typeof localStorage === 'undefined') return null;
+    const raw = safeParseJson<LocalMirrorMeta>(localStorage.getItem(LOCAL_MIRROR_META_KEY));
+    if (
+      raw &&
+      typeof raw.updatedAtMs === 'number' &&
+      Number.isFinite(raw.updatedAtMs) &&
+      typeof raw.revision === 'number' &&
+      typeof raw.contentHash === 'string'
+    ) {
+      return raw;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+};
+
+const writeMirrorMetaToLocalStorage = (meta: LocalMirrorMeta): { ok: boolean; quotaExceeded?: boolean } => {
+  return safeSetLocalStorageItem(LOCAL_MIRROR_META_KEY, JSON.stringify(meta));
 };
 
 /**
@@ -178,7 +274,7 @@ export const cleanupLegacyCloudArtifacts = (): void => {
 
 /**
  * Legge eventuali dati esistenti dalle chiavi storiche `techdraw_*` in localStorage
- * per garantire una migrazione preventiva senza alcuna perdita di dati.
+ * per garantire una migrazione preventiva o il recupero di scritture sincrone interrotte.
  */
 export const readLegacyLocalStorageState = (): Partial<LocalAppState> | null => {
   try {
@@ -250,10 +346,13 @@ export const readLegacyLocalStorageState = (): Partial<LocalAppState> | null => 
 };
 
 /**
- * Specchia i dati essenziali in localStorage come copia secondaria di sicurezza
- * per avvio sincrono rapido e compatibilità con browser con limitazioni IndexedDB.
+ * Specchia in modo sincrono i dati essenziali in localStorage come copia secondaria immediata
+ * per proteggere da chiusure improvvise del browser prima del completamento della transazione IndexedDB.
  */
-export const mirrorStateToLocalStorage = (state: Partial<LocalAppState>): { ok: boolean; quotaExceeded?: boolean } => {
+export const mirrorStateToLocalStorage = (
+  state: Partial<LocalAppState>,
+  meta?: LocalMirrorMeta
+): { ok: boolean; quotaExceeded?: boolean } => {
   let allOk = true;
   let quotaHit = false;
 
@@ -285,13 +384,38 @@ export const mirrorStateToLocalStorage = (state: Partial<LocalAppState>): { ok: 
   if (state.maxHours !== undefined) writeKey('techdraw_max_hours', String(state.maxHours));
   if (state.timeSettingsUpdatedAt !== undefined) writeKey('magiclass_time_settings_updated_at', state.timeSettingsUpdatedAt);
 
+  // Scrive i metadati di versione SOLO se tutte le chiavi sono state salvate senza errori
+  if (meta && allOk) {
+    const metaRes = writeMirrorMetaToLocalStorage(meta);
+    if (!metaRes.ok) {
+      allOk = false;
+      if (metaRes.quotaExceeded) quotaHit = true;
+    }
+  }
+
   return { ok: allOk, quotaExceeded: quotaHit };
 };
 
 let dbPromise: Promise<IDBDatabase> | null = null;
+let lastMonotonicTimestampMs = 0;
+let lastKnownRevision = 0;
+
+const nextMonotonicTimestampMs = (minFloorMs: number = 0): number => {
+  const now = Date.now();
+  const next = Math.max(now, lastMonotonicTimestampMs + 1, minFloorMs + 1);
+  lastMonotonicTimestampMs = next;
+  return next;
+};
 
 export const resetLocalDbConnectionForTests = (): void => {
   dbPromise = null;
+  lastMonotonicTimestampMs = 0;
+  lastKnownRevision = 0;
+  pendingWriteChain = Promise.resolve({
+    ok: true,
+    storageEngine: 'indexeddb'
+  });
+  latestQueuedWriteId = 0;
 };
 
 const openLocalDatabase = (): Promise<IDBDatabase> => {
@@ -335,6 +459,9 @@ const openLocalDatabase = (): Promise<IDBDatabase> => {
         const db = request.result;
         db.onversionchange = () => {
           db.close();
+          dbPromise = null;
+        };
+        db.onclose = () => {
           dbPromise = null;
         };
         resolve(db);
@@ -415,6 +542,25 @@ const pruneOldSnapshots = async (db: IDBDatabase): Promise<void> => {
 };
 
 /**
+ * Richiede in modo non bloccante l'archiviazione persistente al browser
+ * per ridurre il rischio di rimozione automatica dei dati in caso di spazio limitato.
+ */
+export const requestPersistentStorageBestEffort = async (): Promise<boolean> => {
+  try {
+    if (typeof navigator !== 'undefined' && navigator.storage && typeof navigator.storage.persist === 'function') {
+      const already = typeof navigator.storage.persisted === 'function'
+        ? await navigator.storage.persisted()
+        : false;
+      if (already) return true;
+      return await navigator.storage.persist();
+    }
+  } catch {
+    // ignore
+  }
+  return false;
+};
+
+/**
  * Crea uno snapshot di sicurezza atomico prima di operazioni critiche (migrazione o ripristino backup).
  */
 export const createLocalSnapshot = async (
@@ -432,7 +578,6 @@ export const createLocalSnapshot = async (
   };
 
   if (!isIndexedDBAvailable()) {
-    // Fallback in localStorage per rollback d'emergenza
     safeSetLocalStorageItem('magiclass_last_safety_snapshot', JSON.stringify(snapshot));
     return snapshot;
   }
@@ -504,18 +649,43 @@ export const getSnapshotById = async (snapshotId: string): Promise<LocalSnapshot
   }
 };
 
+const getRecordTimestampMs = (record: StoredStateRecord | null): number => {
+  if (!record) return 0;
+  if (typeof record.updatedAtMs === 'number' && Number.isFinite(record.updatedAtMs) && record.updatedAtMs > 0) {
+    return record.updatedAtMs;
+  }
+  const parsed = Date.parse(record.updatedAt || '');
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+};
+
 /**
- * Inizializza il database locale IndexedDB, pulisce i residui cloud obsoleti
- * ed esegue una migrazione verificata e senza perdita dai dati `localStorage` preesistenti.
+ * Inizializza il database locale IndexedDB, pulisce i residui cloud obsoleti,
+ * confronta in modo sicuro IndexedDB con l'eventuale copia sincrona più recente
+ * (es. dopo chiusura improvvisa del browser) e migra eventuali dati legacy senza perdita.
  */
 export const initAndLoadLocalDatabase = async (
   currentHydratedDefaults: LocalAppState
 ): Promise<LocalDbInitResult> => {
   cleanupLegacyCloudArtifacts();
+  void requestPersistentStorageBestEffort();
 
   if (!isIndexedDBAvailable()) {
+    const legacy = readLegacyLocalStorageState();
+    const fallbackData: LocalAppState = {
+      ...currentHydratedDefaults,
+      ...(legacy || {})
+    };
+    const mirrorMeta = readMirrorMetaFromLocalStorage();
     return {
-      record: null,
+      record: {
+        id: PRIMARY_STATE_KEY,
+        schemaVersion: LOCAL_DB_SCHEMA_VERSION,
+        revision: mirrorMeta?.revision || 1,
+        updatedAt: mirrorMeta?.updatedAt || new Date().toISOString(),
+        updatedAtMs: mirrorMeta?.updatedAtMs || Date.now(),
+        contentHash: mirrorMeta?.contentHash || computeStateContentHash(fallbackData),
+        data: fallbackData
+      },
       migratedFromLocalStorage: false,
       storageEngine: 'localstorage_fallback',
       warningMessage: 'IndexedDB non disponibile: utilizzo archiviazione locale compatibile (localStorage).'
@@ -525,8 +695,70 @@ export const initAndLoadLocalDatabase = async (
   try {
     const db = await openLocalDatabase();
     const existingRecord = await readPrimaryStateFromDb(db);
+    const mirrorMeta = readMirrorMetaFromLocalStorage();
+    const legacyPartial = readLegacyLocalStorageState();
 
     if (existingRecord && existingRecord.data) {
+      const idbTs = getRecordTimestampMs(existingRecord);
+      const idbHash = existingRecord.contentHash || computeStateContentHash(existingRecord.data);
+      lastKnownRevision = Math.max(lastKnownRevision, existingRecord.revision || 0);
+      lastMonotonicTimestampMs = Math.max(lastMonotonicTimestampMs, idbTs);
+
+      // Controllo integrità anti-perdita: se lo specchio sincrono in localStorage contiene
+      // una scrittura verificata PIÙ RECENTE di IndexedDB (es. chiusura improvvisa durante transazione IDB),
+      // recupera quei dati e li consolida subito in IndexedDB invece di sovrascriverli con il vecchio record!
+      if (mirrorMeta && legacyPartial && mirrorMeta.updatedAtMs > idbTs) {
+        const candidateMirrorState: LocalAppState = {
+          ...existingRecord.data,
+          ...legacyPartial
+        };
+        const computedMirrorHash = computeStateContentHash(candidateMirrorState);
+
+        if (computedMirrorHash === mirrorMeta.contentHash && computedMirrorHash !== idbHash) {
+          const recoveredRev = Math.max(existingRecord.revision || 0, mirrorMeta.revision || 0) + 1;
+          const recoveredTs = nextMonotonicTimestampMs(mirrorMeta.updatedAtMs);
+          const recoveredIso = new Date(recoveredTs).toISOString();
+          const recoveredRecord: StoredStateRecord = {
+            id: PRIMARY_STATE_KEY,
+            schemaVersion: LOCAL_DB_SCHEMA_VERSION,
+            revision: recoveredRev,
+            updatedAt: recoveredIso,
+            updatedAtMs: recoveredTs,
+            contentHash: computedMirrorHash,
+            data: candidateMirrorState
+          };
+
+          await writePrimaryStateToDb(db, recoveredRecord);
+          const verifiedRecovered = await readPrimaryStateFromDb(db);
+          if (verifiedRecovered && verifiedRecovered.data) {
+            lastKnownRevision = recoveredRev;
+            mirrorStateToLocalStorage(verifiedRecovered.data, {
+              schemaVersion: LOCAL_DB_SCHEMA_VERSION,
+              revision: recoveredRev,
+              updatedAt: recoveredIso,
+              updatedAtMs: recoveredTs,
+              contentHash: computedMirrorHash
+            });
+            return {
+              record: verifiedRecovered,
+              migratedFromLocalStorage: false,
+              recoveredNewerMirror: true,
+              storageEngine: 'indexeddb'
+            };
+          }
+        }
+      }
+
+      // Allinea silenziosamente lo specchio localStorage con il record autorevole di IndexedDB
+      const syncedTs = idbTs || nextMonotonicTimestampMs();
+      mirrorStateToLocalStorage(existingRecord.data, {
+        schemaVersion: LOCAL_DB_SCHEMA_VERSION,
+        revision: existingRecord.revision || 1,
+        updatedAt: existingRecord.updatedAt || new Date(syncedTs).toISOString(),
+        updatedAtMs: syncedTs,
+        contentHash: idbHash
+      });
+
       return {
         record: existingRecord,
         migratedFromLocalStorage: false,
@@ -535,7 +767,6 @@ export const initAndLoadLocalDatabase = async (
     }
 
     // IndexedDB vuoto: verifica presenza dati legacy in localStorage e migra in modo verificato
-    const legacyPartial = readLegacyLocalStorageState();
     const mergedInitialState: LocalAppState = {
       ...currentHydratedDefaults,
       ...(legacyPartial || {})
@@ -549,12 +780,17 @@ export const initAndLoadLocalDatabase = async (
       );
     }
 
-    const nowIso = new Date().toISOString();
+    const nowMs = nextMonotonicTimestampMs(mirrorMeta?.updatedAtMs || 0);
+    const nowIso = new Date(nowMs).toISOString();
+    const contentHash = computeStateContentHash(mergedInitialState);
+    const initialRev = Math.max(1, mirrorMeta?.revision || 1);
     const initialRecord: StoredStateRecord = {
       id: PRIMARY_STATE_KEY,
       schemaVersion: LOCAL_DB_SCHEMA_VERSION,
-      revision: 1,
+      revision: initialRev,
       updatedAt: nowIso,
+      updatedAtMs: nowMs,
+      contentHash,
       data: mergedInitialState
     };
 
@@ -566,6 +802,15 @@ export const initAndLoadLocalDatabase = async (
       throw new Error('Verifica lettura post-migrazione fallita.');
     }
 
+    lastKnownRevision = verified.revision;
+    mirrorStateToLocalStorage(verified.data, {
+      schemaVersion: LOCAL_DB_SCHEMA_VERSION,
+      revision: verified.revision,
+      updatedAt: nowIso,
+      updatedAtMs: nowMs,
+      contentHash
+    });
+
     return {
       record: verified,
       migratedFromLocalStorage: Boolean(legacyPartial),
@@ -573,8 +818,24 @@ export const initAndLoadLocalDatabase = async (
     };
   } catch (err: any) {
     console.warn('Fallback a localStorage per errore inizializzazione IndexedDB:', err);
+    const legacy = readLegacyLocalStorageState();
+    const fallbackData: LocalAppState = {
+      ...currentHydratedDefaults,
+      ...(legacy || {})
+    };
+    const mirrorMeta = readMirrorMetaFromLocalStorage();
     return {
-      record: null,
+      record: legacy
+        ? {
+            id: PRIMARY_STATE_KEY,
+            schemaVersion: LOCAL_DB_SCHEMA_VERSION,
+            revision: mirrorMeta?.revision || 1,
+            updatedAt: mirrorMeta?.updatedAt || new Date().toISOString(),
+            updatedAtMs: mirrorMeta?.updatedAtMs || Date.now(),
+            contentHash: mirrorMeta?.contentHash || computeStateContentHash(fallbackData),
+            data: fallbackData
+          }
+        : null,
       migratedFromLocalStorage: false,
       storageEngine: 'localstorage_fallback',
       warningMessage: err?.message || 'Database IndexedDB temporaneamente non accessibile: attivo salvataggio locale compatibile.'
@@ -582,26 +843,90 @@ export const initAndLoadLocalDatabase = async (
   }
 };
 
-// Coda sequenziale per evitare race condition tra salvataggi ravvicinati
+// Coda sequenziale rigorosa per evitare race condition tra salvataggi ravvicinati
 let pendingWriteChain: Promise<LocalDbWriteResult> = Promise.resolve({
   ok: true,
   storageEngine: 'indexeddb'
 });
+let latestQueuedWriteId = 0;
 
 /**
- * Salva in modo atomico lo stato completo dell'applicazione in IndexedDB
- * e aggiorna la copia speculare di sicurezza in localStorage.
+ * Flush sincrono d'emergenza dello specchio localStorage (chiamabile su pagehide/beforeunload/visibilitychange)
+ * con timestamp monotonico verificato, seguito da scrittura asincrona best-effort su IndexedDB.
+ */
+export const flushAppStateMirrorSync = (state: LocalAppState): LocalMirrorMeta => {
+  const clonedState: LocalAppState = JSON.parse(JSON.stringify(state));
+  const nowMs = nextMonotonicTimestampMs();
+  const nowIso = new Date(nowMs).toISOString();
+  const nextRevision = lastKnownRevision + 1;
+  lastKnownRevision = nextRevision;
+  const contentHash = computeStateContentHash(clonedState);
+
+  const meta: LocalMirrorMeta = {
+    schemaVersion: LOCAL_DB_SCHEMA_VERSION,
+    revision: nextRevision,
+    updatedAt: nowIso,
+    updatedAtMs: nowMs,
+    contentHash
+  };
+
+  mirrorStateToLocalStorage(clonedState, meta);
+  return meta;
+};
+
+/**
+ * Salva in modo atomico e verificato lo stato completo dell'applicazione:
+ * 1. Scrive IMMEDIATAMENTE e SINCRONAMENTE lo specchio localStorage con timestamp e hash di integrità
+ *    (protezione istantanea contro chiusure improvvise della scheda/browser).
+ * 2. Accoda in modo sequenziale la transazione readwrite su IndexedDB (`magiclass_local_db`)
+ *    con retry automatico su riconnessione e verifica attiva post-scrittura.
+ * 3. Non maschera mai un fallimento di IndexedDB come successo silenzioso.
  */
 export const saveAppStateToLocalDb = (state: LocalAppState): Promise<LocalDbWriteResult> => {
   const clonedState: LocalAppState = JSON.parse(JSON.stringify(state));
+  const writeId = ++latestQueuedWriteId;
+
+  const nowMs = nextMonotonicTimestampMs();
+  const nowIso = new Date(nowMs).toISOString();
+  const plannedRevision = lastKnownRevision + 1;
+  lastKnownRevision = plannedRevision;
+  const contentHash = computeStateContentHash(clonedState);
+
+  const mirrorMeta: LocalMirrorMeta = {
+    schemaVersion: LOCAL_DB_SCHEMA_VERSION,
+    revision: plannedRevision,
+    updatedAt: nowIso,
+    updatedAtMs: nowMs,
+    contentHash
+  };
+
+  // Passo 1: Scrittura sincrona immediata dello specchio di sicurezza (zero attesa microtask!)
+  const lsResult = mirrorStateToLocalStorage(clonedState, mirrorMeta);
 
   const runWrite = async (): Promise<LocalDbWriteResult> => {
-    const lsResult = mirrorStateToLocalStorage(clonedState);
+    // Se nel frattempo è stata accodata una scrittura ancora più recente, lascia che sia quella
+    // a consolidare in IndexedDB per evitare scritture obsolete concorrenti.
+    if (writeId < latestQueuedWriteId) {
+      return {
+        ok: true,
+        revision: plannedRevision,
+        updatedAt: nowIso,
+        updatedAtMs: nowMs,
+        contentHash,
+        verified: false,
+        superseded: true,
+        persistedInIndexedDb: false,
+        persistedInLocalStorage: lsResult.ok,
+        storageEngine: isIndexedDBAvailable() ? 'indexeddb' : 'localstorage_fallback'
+      };
+    }
 
     if (!isIndexedDBAvailable()) {
       if (!lsResult.ok) {
         return {
           ok: false,
+          persistedInIndexedDb: false,
+          persistedInLocalStorage: false,
           storageEngine: 'localstorage_fallback',
           errorCode: lsResult.quotaExceeded ? 'QUOTA_EXCEEDED' : 'WRITE_FAILED',
           errorMessage: lsResult.quotaExceeded
@@ -611,67 +936,140 @@ export const saveAppStateToLocalDb = (state: LocalAppState): Promise<LocalDbWrit
       }
       return {
         ok: true,
-        updatedAt: new Date().toISOString(),
+        revision: plannedRevision,
+        updatedAt: nowIso,
+        updatedAtMs: nowMs,
+        contentHash,
+        verified: true,
+        persistedInIndexedDb: false,
+        persistedInLocalStorage: true,
         storageEngine: 'localstorage_fallback'
       };
     }
 
-    try {
+    const attemptIndexedDbWrite = async (): Promise<LocalDbWriteResult> => {
       const db = await openLocalDatabase();
       const existing = await readPrimaryStateFromDb(db);
-      const nextRevision = (existing?.revision || 0) + 1;
-      const nowIso = new Date().toISOString();
+      const nextRevision = Math.max((existing?.revision || 0) + 1, plannedRevision);
+      lastKnownRevision = Math.max(lastKnownRevision, nextRevision);
 
       const record: StoredStateRecord = {
         id: PRIMARY_STATE_KEY,
         schemaVersion: LOCAL_DB_SCHEMA_VERSION,
         revision: nextRevision,
         updatedAt: nowIso,
+        updatedAtMs: nowMs,
+        contentHash,
         data: clonedState
       };
 
       await writePrimaryStateToDb(db, record);
 
+      // Verifica reale post-commit su IndexedDB
+      const verified = await readPrimaryStateFromDb(db);
+      const isVerified = Boolean(
+        verified &&
+        verified.data &&
+        verified.revision >= nextRevision &&
+        (verified.contentHash === contentHash || verified.revision > nextRevision)
+      );
+
+      if (!isVerified) {
+        return {
+          ok: false,
+          revision: nextRevision,
+          updatedAt: nowIso,
+          updatedAtMs: nowMs,
+          contentHash,
+          verified: false,
+          persistedInIndexedDb: false,
+          persistedInLocalStorage: lsResult.ok,
+          storageEngine: 'indexeddb',
+          errorCode: 'VERIFY_FAILED',
+          errorMessage: 'Verifica post-salvataggio nel database locale non confermata. Effettua un backup di sicurezza.'
+        };
+      }
+
+      // Allinea la revisione finale nello specchio se incrementata rispetto a plannedRevision
+      if (nextRevision !== plannedRevision && lsResult.ok) {
+        writeMirrorMetaToLocalStorage({
+          ...mirrorMeta,
+          revision: nextRevision
+        });
+      }
+
       return {
         ok: true,
         revision: nextRevision,
         updatedAt: nowIso,
+        updatedAtMs: nowMs,
+        contentHash,
+        verified: true,
+        persistedInIndexedDb: true,
+        persistedInLocalStorage: lsResult.ok,
         storageEngine: 'indexeddb'
       };
-    } catch (err: any) {
-      const isQuota =
-        err?.name === 'QuotaExceededError' ||
-        err?.code === 22 ||
-        String(err?.message || '').toLowerCase().includes('quota');
+    };
 
-      if (isQuota) {
-        return {
-          ok: false,
-          storageEngine: 'indexeddb',
-          errorCode: 'QUOTA_EXCEEDED',
-          errorMessage: 'Spazio di archiviazione locale esaurito sul dispositivo. Esporta subito un backup su disco.'
-        };
+    try {
+      return await attemptIndexedDbWrite();
+    } catch (firstErr: any) {
+      // Retry automatico una volta su riconnessione (es. dopo chiusura connessione su sospensione scheda/mobile)
+      const isQuotaFirst =
+        firstErr?.name === 'QuotaExceededError' ||
+        firstErr?.code === 22 ||
+        String(firstErr?.message || '').toLowerCase().includes('quota');
+
+      if (!isQuotaFirst) {
+        dbPromise = null;
+        try {
+          return await attemptIndexedDbWrite();
+        } catch (retryErr: any) {
+          return buildWriteErrorResult(retryErr, lsResult.ok);
+        }
       }
 
-      if (lsResult.ok) {
-        return {
-          ok: true,
-          updatedAt: new Date().toISOString(),
-          storageEngine: 'localstorage_fallback',
-          warningMessage: undefined
-        } as LocalDbWriteResult;
-      }
-
-      return {
-        ok: false,
-        storageEngine: 'indexeddb',
-        errorCode: 'WRITE_FAILED',
-        errorMessage: `Errore nel salvataggio locale: ${err?.message || 'operazione non riuscita'}.`
-      };
+      return buildWriteErrorResult(firstErr, lsResult.ok);
     }
   };
 
   pendingWriteChain = pendingWriteChain.then(runWrite, runWrite);
+  return pendingWriteChain;
+};
+
+const buildWriteErrorResult = (err: any, persistedInLocalStorage: boolean): LocalDbWriteResult => {
+  const isQuota =
+    err?.name === 'QuotaExceededError' ||
+    err?.code === 22 ||
+    String(err?.message || '').toLowerCase().includes('quota');
+
+  if (isQuota) {
+    return {
+      ok: false,
+      persistedInIndexedDb: false,
+      persistedInLocalStorage,
+      storageEngine: 'indexeddb',
+      errorCode: 'QUOTA_EXCEEDED',
+      errorMessage: 'Spazio di archiviazione locale esaurito sul dispositivo. Esporta subito un backup su disco.'
+    };
+  }
+
+  return {
+    ok: false,
+    persistedInIndexedDb: false,
+    persistedInLocalStorage,
+    storageEngine: 'indexeddb',
+    errorCode: 'WRITE_FAILED',
+    errorMessage: persistedInLocalStorage
+      ? `Database IndexedDB non raggiungibile (${err?.message || 'errore transazione'}). Copia temporanea salvata nel browser: verifica o esporta un backup.`
+      : `Errore nel salvataggio locale: ${err?.message || 'operazione non riuscita'}.`
+  };
+};
+
+/**
+ * Attende il completamento di tutte le scritture pendenti in coda (utile per test e verifiche).
+ */
+export const waitForPendingLocalDbWrites = (): Promise<LocalDbWriteResult> => {
   return pendingWriteChain;
 };
 
@@ -773,4 +1171,3 @@ export const clearUiSessionRecordFromLocalDb = async (): Promise<boolean> => {
     return false;
   }
 };
-
